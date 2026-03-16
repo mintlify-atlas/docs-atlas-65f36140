@@ -1,0 +1,154 @@
+{
+  "projectType": "framework",
+  "projectName": "JReactive",
+  "projectDescription": "A server-driven reactive UI framework for Java 21 that enables building fully interactive single-page applications entirely in Java, with state managed on the server and DOM updates delivered to the browser via WebSocket.",
+  "theme": "linden",
+  "primaryColor": "#4F46E5",
+  "lightColor": "#818CF8",
+  "darkColor": "#3730A3",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "how-it-works"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/components",
+              "concepts/reactive-state",
+              "concepts/smart-collections",
+              "concepts/templates",
+              "concepts/routing",
+              "concepts/rendering-modes",
+              "concepts/state-persistence"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/spring-boot-integration",
+              "guides/standalone-mode",
+              "guides/forms-and-validation",
+              "guides/optimistic-ui",
+              "guides/scoped-css",
+              "guides/aot-compilation",
+              "guides/redis-store",
+              "guides/spa-navigation"
+            ]
+          },
+          {
+            "group": "UI Components",
+            "pages": [
+              "ui/overview",
+              "ui/jbutton",
+              "ui/jinput",
+              "ui/jselect",
+              "ui/jcheckbox",
+              "ui/jform",
+              "ui/jtable",
+              "ui/jcard",
+              "ui/jmodal",
+              "ui/link"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core API",
+            "pages": [
+              "api/html-component",
+              "api/reactive-var",
+              "api/type",
+              "api/event-bus"
+            ]
+          },
+          {
+            "group": "Annotations",
+            "pages": [
+              "api/annotations/state",
+              "api/annotations/bind",
+              "api/annotations/call",
+              "api/annotations/route",
+              "api/annotations/layout",
+              "api/annotations/stateful",
+              "api/annotations/stateless",
+              "api/annotations/statefulram",
+              "api/annotations/client",
+              "api/annotations/dommode",
+              "api/annotations/param"
+            ]
+          },
+          {
+            "group": "Smart Collections",
+            "pages": [
+              "api/smart-list",
+              "api/smart-set",
+              "api/smart-map"
+            ]
+          },
+          {
+            "group": "SPI & Extension",
+            "pages": [
+              "api/state-store",
+              "api/component-accessor",
+              "api/component-factory",
+              "api/route-provider"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Server-driven reactive UI — all state and logic lives on the JVM, no custom JavaScript required",
+    "WebSocket-powered live DOM updates with fine-grained delta pushes to the browser",
+    "Mustache-style template language with conditionals, loops, and child component composition",
+    "AOT annotation processor generates zero-reflection accessors and pre-compiled client-side JS templates at build time",
+    "Multiple rendering modes: SSR with hydration, CSR shells, server-owned HTML-on-the-wire, and stateless token-based",
+    "Smart reactive collections (SmartList, SmartSet, SmartMap) with fine-grained ADD/REMOVE/SET delta events",
+    "Built-in Spring Boot auto-configuration with full Spring DI support in route components",
+    "Undertow-based standalone mode for deployments without Spring Boot",
+    "Redis-backed distributed state store with L1/L2 Caffeine+Redis hybrid caching for horizontal scaling",
+    "SPA router with partial page rendering via X-Partial header and Idiomorph DOM morphing",
+    "Optimistic UI DSL for zero-latency perceived interactions with automatic server-error rollback",
+    "Scoped CSS compilation with component-level selector prefixing at build time",
+    "Bean Validation (Jakarta) integration for @Call method arguments with per-field error display",
+    "Built-in UI component library: JButton, JInput, JSelect, JCheckBox, JForm, JTable, JCard, JModal, Link"
+  ],
+  "publicApiSurface": [
+    "HtmlComponent — base class for all components; override template(), onInit(), onMount(), onUnmount()",
+    "ReactiveVar<T> — observable value cell: get(), set(T), onChange(Consumer<T>)",
+    "Type<T> — ergonomic reactive field wrapper: Type.of(v), Type.$(v), .get(), .set()",
+    "SmartList<E> / SmartSet<E> / SmartMap<K,V> — observable collections with delta change events",
+    "@State — marks a field as reactive server state synced over WebSocket",
+    "@Bind — marks a field as a property bindable from a parent component template",
+    "@Call — marks a method as browser-callable; invoked via POST /call/{ComponentId.method}",
+    "@Route(path) — maps a component class to a URL path (supports {param} placeholders)",
+    "@Layout(Class) — wraps a page component in a layout shell component",
+    "@Param(name) / @UrlParam(name) — injects URL path or query parameters into fields",
+    "@Stateful — persists component state to Redis for distributed/multi-pod deployments",
+    "@StatefulRam — persists component state in JVM memory (Caffeine cache)",
+    "@Stateless — zero server memory; state travels in a signed LZ4+HMAC token in the page",
+    "@Client — activates CSR mode; component renders from a pre-compiled JS template client-side",
+    "@DomMode(SERVER_OWNED | CLIENT_MANAGED) — controls DOM ownership strategy",
+    "EventBus — in-process pub/sub: on(event, handler), emit(event, payload)",
+    "StateStore — SPI interface: get/put/replace(CAS)/remove/removeSession",
+    "ComponentAccessor<T> — AOT-generated SPI: read, write, call, getAst, getScopedCss",
+    "ComponentFactory — SPI for component instantiation (default: no-arg constructor reflection)",
+    "RouteProvider — SPI: resolve(path) returns component instance + path parameters",
+    "JrxSession — WebSocket session abstraction: sendText, getId, isOpen, close, setAttr/getAttr",
+    "JReactiveServer — Undertow standalone server entry point (no Spring required)",
+    "JRX.Store.set(key, value) / JRX.Store.get(key) / JRX.Store.bind(key, fn) — client-side JS global store"
+  ]
+}
