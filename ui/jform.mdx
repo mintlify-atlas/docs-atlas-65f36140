@@ -1,0 +1,120 @@
+---
+title: "JForm"
+description: "A form container component that wraps child inputs and wires a submit callback to a server-side @Call method."
+---
+
+`JForm` renders a `<form>` element with `novalidate` set, disabling default browser validation so that JReactive's server-side validation (via Jakarta Bean Validation) handles errors instead. Child components placed inside `<JForm>` fill its `<slot />`, and the form automatically renders a submit button when `onSubmit` is set.
+
+## Properties
+
+<ParamField path="title" type="String" default="">
+  When set, renders an `<h2 class="jrx-form-title">` above the form body.
+</ParamField>
+
+<ParamField path="layout" type="String" default="vertical">
+  The layout mode applied as a CSS class (`layout-{value}`) on the form body container. Built-in options are `vertical` and `horizontal`. You can add custom CSS for additional layout values.
+</ParamField>
+
+<ParamField path="onSubmit" type="String" default="">
+  The `@Call` expression invoked when the form is submitted. When this property is set, `JForm` automatically renders a submit button. Example: `"save(form)"`.
+</ParamField>
+
+## Usage example
+
+Place child input components inside `<JForm>`. They fill the `<slot />`:
+
+```html template
+<JForm title="Create account" onSubmit="register(form)">
+    <JInput label="Full name" field="form.name" required="true" />
+    <JInput label="Email" type="email" field="form.email" required="true" />
+    <JInput label="Password" type="password" field="form.password" required="true" />
+    <JCheckBox label="I accept the terms" field="form.acceptTerms" required="true" />
+</JForm>
+```
+
+## Java setup
+
+The `onSubmit` value maps directly to a `@Call` method. The form DTO is built from the `name` attributes of all child inputs:
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+import jakarta.validation.Valid;
+import java.io.Serializable;
+
+@Route(path = "/signup")
+public class SignupPage extends AppPage {
+
+    public static class SignupForm implements Serializable {
+        public String name;
+        public String email;
+        public String password;
+    }
+
+    @State public String message = "";
+
+    @Call
+    public void register(@Valid SignupForm form) {
+        // Jakarta validation runs before this method body
+        this.message = "Welcome, " + form.name + "!";
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <JForm title="Create account" onSubmit="register(form)">
+                <JInput label="Name" field="form.name" required="true" />
+                <JInput label="Email" type="email" field="form.email" required="true" />
+                <JInput label="Password" type="password" field="form.password" required="true" />
+            </JForm>
+            {{#if message}}
+                <p>{{message}}</p>
+            {{/if}}
+        """;
+    }
+}
+```
+
+## Layout options
+
+| Value | CSS class applied | Description |
+|---|---|---|
+| `vertical` | `layout-vertical` | Stacks fields top to bottom (default). |
+| `horizontal` | `layout-horizontal` | Places label and input side by side. |
+
+You can define additional layout values by adding corresponding CSS rules for `.layout-{value}` to your stylesheet.
+
+## Slot-based content
+
+All child tags placed between `<JForm>` and `</JForm>` are rendered into the `<slot />` inside the form body:
+
+```html template
+<!-- Children fill the slot -->
+<JForm onSubmit="save(form)">
+    <JInput label="Title" field="form.title" />
+    <JSelect label="Category" field="form.category" :options="categories" />
+    <!-- Any HTML or component is valid here -->
+    <input type="hidden" name="form.id" value="{{form.id}}">
+</JForm>
+```
+
+## Real-world example
+
+From `ClientsPage` — a form inside a modal that saves a `Client_` object:
+
+```html template
+<JModal :title="modalTitle" :visible="isModalOpen" onClose="closeModal()">
+    <JForm onSubmit="save(form)">
+        <input type="hidden" name="form.id" value="{{form.id}}">
+        <JInput label="Nombre Completo" :field="form.name" required="true" />
+        <JInput label="Correo Electrónico" type="email" :field="form.email" required="true" />
+        <JSelect label="Estado" :field="form.status" :options="statusOptions" required="true" />
+    </JForm>
+</JModal>
+```
+
+<Tip>
+  Add `@Valid` to the `@Call` method parameter to activate Jakarta Bean Validation. If validation fails, the `CallGuard` intercepts the call and returns validation errors to the client — the method body never executes.
+</Tip>

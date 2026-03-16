@@ -1,0 +1,188 @@
+---
+title: "JModal"
+description: "A modal dialog controlled by a server-side boolean state field, with a title, body slot, and close callback."
+---
+
+`JModal` renders a backdrop and centered dialog when `visible` is `true`. Visibility is driven entirely by server state — you open and close the modal by mutating a `@State boolean` field from `@Call` methods. A close button in the modal header calls the `onClose` callback, and the modal body is filled via `<slot />`.
+
+## Properties
+
+<ParamField path="visible" type="boolean" default="false">
+  Controls whether the modal is shown. Set this from a `@State` field and toggle it in `@Call` methods.
+</ParamField>
+
+<ParamField path="title" type="String" default="Mensaje del Sistema">
+  The heading text shown in the modal header.
+</ParamField>
+
+<ParamField path="onClose" type="String" default="">
+  The `@Call` expression invoked when the user clicks the &times; button in the modal header. Your method should set the `visible`-controlling state field to `false`.
+</ParamField>
+
+## Opening and closing
+
+The standard pattern is a `@State boolean` on the parent page and two `@Call` methods:
+
+```java
+@State public boolean isModalOpen = false;
+
+@Call
+public void openModal() {
+    this.isModalOpen = true;
+}
+
+@Call
+public void closeModal() {
+    this.isModalOpen = false;
+}
+```
+
+Bind `visible` and `onClose` in the template:
+
+```html template
+<JModal title="Confirm action" :visible="isModalOpen" onClose="closeModal()">
+    <p>Are you sure you want to proceed?</p>
+    <button @click="confirm()">Yes, proceed</button>
+    <button @click="closeModal()">Cancel</button>
+</JModal>
+```
+
+## Usage example
+
+```html template
+<button @click="openModal()" style="padding: 10px 20px;">
+    Open dialog
+</button>
+
+<JModal title="Confirmation required" :visible="isModalOpen" onClose="closeModal()">
+    <p>Do you want to apply these changes?</p>
+    <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+        <button @click="closeModal()">Cancel</button>
+        <button @click="confirmAction()"
+                style="background: #007bff; color: white; border: none; padding: 5px 15px; border-radius: 4px;">
+            Confirm
+        </button>
+    </div>
+</JModal>
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/modal-test")
+public class ModalTestPage extends AppPage {
+
+    @State public String status = "Waiting for action...";
+    @State public boolean isModalOpen = false;
+
+    @Call
+    public void openModal() {
+        this.isModalOpen = true;
+    }
+
+    @Call
+    public void closeModal() {
+        this.isModalOpen = false;
+    }
+
+    @Call
+    public void confirmAction() {
+        this.status = "Action confirmed!";
+        this.isModalOpen = false;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div style="padding: 50px; text-align: center;">
+                <p>Status: <strong>{{status}}</strong></p>
+
+                <button @click="openModal()" style="padding: 10px 20px;">
+                    Open modal
+                </button>
+
+                <JModal title="Confirmation required"
+                        :visible="isModalOpen"
+                        onClose="closeModal()">
+                    <p>Are you sure you want to apply this action?</p>
+                    <div style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+                        <button @click="closeModal()">Cancel</button>
+                        <button @click="confirmAction()"
+                                style="background: #007bff; color: white; border: none; padding: 5px 15px; border-radius: 4px;">
+                            Confirm
+                        </button>
+                    </div>
+                </JModal>
+            </div>
+        """;
+    }
+}
+```
+
+## Body overflow lock
+
+When the modal is visible, `client:mount` and `client:unmount` hooks set and unset `document.body.style.overflow = 'hidden'` to prevent background scrolling:
+
+```html rendered
+<div class="jrx-modal-backdrop"
+     client:mount="document.body.style.overflow='hidden'"
+     client:unmount="document.body.style.overflow=''">...</div>
+```
+
+This happens automatically — no configuration is required.
+
+## Real-world example
+
+From `ClientsPage` — a modal used for both create and edit operations, with a dynamic title:
+
+```java
+@State public boolean isModalOpen = false;
+@State public String modalTitle = "New client";
+@State public Client_ form = new Client_();
+
+@Call
+public void openCreate() {
+    this.form = new Client_();
+    this.modalTitle = "Create client";
+    this.isModalOpen = true;
+}
+
+@Call
+public void openEdit(Client_ row) {
+    this.form = row;
+    this.modalTitle = "Edit client: " + row.name;
+    this.isModalOpen = true;
+}
+
+@Call
+public void closeModal() {
+    this.isModalOpen = false;
+}
+
+@Call
+public void save(Client_ form) {
+    service.save(form);
+    this.clients = service.findAll();
+    this.isModalOpen = false;
+}
+```
+
+```html template
+<JModal :title="modalTitle" :visible="isModalOpen" onClose="closeModal()">
+    <JForm onSubmit="save(form)">
+        <input type="hidden" name="form.id" value="{{form.id}}">
+        <JInput label="Nombre Completo" :field="form.name" required="true" />
+        <JInput label="Correo Electrónico" type="email" :field="form.email" required="true" />
+        <JSelect label="Estado" :field="form.status" :options="statusOptions" required="true" />
+    </JForm>
+</JModal>
+```
+
+<Tip>
+  Pass the modal content directly as children — there is no `ref=` mechanism. The modal's body is its `<slot />`, so any HTML or child components you nest inside `<JModal>...</JModal>` appear in the dialog body.
+</Tip>

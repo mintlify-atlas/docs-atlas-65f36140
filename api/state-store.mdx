@@ -1,0 +1,208 @@
+---
+title: "StateStore"
+description: "Interface for component state persistence. Built-in implementations include CaffeineStateStore, RedisStateStore, and HybridStateStore. Implement this interface to provide a custom backend."
+---
+
+`StateStore` is the persistence abstraction for JReactive component state. The runtime loads and saves `HtmlComponent` instances through this interface. Three built-in implementations are provided; you can also supply your own.
+
+**Package:** `com.ciro.jreactive.store`
+
+## Interface definition
+
+```java
+public interface StateStore {
+    HtmlComponent get(String sessionId, String path);
+    void put(String sessionId, String path, HtmlComponent component);
+    boolean replace(String sessionId, String path, HtmlComponent component, long expectedVersion);
+    void remove(String sessionId, String path);
+    void removeSession(String sessionId);
+}
+```
+
+## Methods
+
+<ResponseField name="get" type="HtmlComponent">
+  Retrieves the component associated with `sessionId` and `path`. Returns `null` if no component is stored for that combination.
+
+  | Parameter | Type | Description |
+  |---|---|---|
+  | `sessionId` | `String` | The WebSocket session identifier |
+  | `path` | `String` | The URL path the component is registered at |
+</ResponseField>
+
+<ResponseField name="put" type="void">
+  Stores a component unconditionally, overwriting any existing entry. Does not perform version checking.
+
+  | Parameter | Type | Description |
+  |---|---|---|
+  | `sessionId` | `String` | The WebSocket session identifier |
+  | `path` | `String` | The URL path the component is registered at |
+  | `component` | `HtmlComponent` | The component instance to store |
+</ResponseField>
+
+<ResponseField name="replace" type="boolean">
+  Atomic compare-and-swap (CAS) write. Stores `component` only if the current version in the store equals `expectedVersion`. Returns `true` on success, `false` if the version does not match (concurrent modification detected).
+
+  Pass `expectedVersion = 0` to create a new entry that does not yet exist.
+
+  | Parameter | Type | Description |
+  |---|---|---|
+  | `sessionId` | `String` | The WebSocket session identifier |
+  | `path` | `String` | The URL path the component is registered at |
+  | `component` | `HtmlComponent` | The new component instance to store |
+  | `expectedVersion` | `long` | The version the caller observed before making changes |
+</ResponseField>
+
+<ResponseField name="remove" type="void">
+  Removes the component for the given session and path. A no-op if no entry exists.
+</ResponseField>
+
+<ResponseField name="removeSession" type="void">
+  Removes **all** components associated with `sessionId`. Called when a WebSocket session disconnects.
+</ResponseField>
+
+## Built-in implementations
+
+### `CaffeineStateStore`
+
+**Module:** `jreactive-runtime-jvm`
+
+In-memory store backed by Caffeine. Used by default when no Redis configuration is present.
+
+| Property | Value |
+|---|---|
+| TTL | 30 minutes (access-based) |
+| Max entries | 10,000 |
+| CAS | `cache.asMap().compute()` (atomic per key) |
+| Eviction callback | Calls `component._unmountRecursive()` |
+| Cache key | `"{sessionId}::{path}"` |
+
+```java
+public class CaffeineStateStore implements StateStore {
+    // Bounded Caffeine cache with eviction hooks
+}
+```
+
+### `RedisStateStore`
+
+**Module:** `jreactive-store-redis`
+
+Redis-backed store using Jedis. Enables durability and horizontal scaling.
+
+| Property | Value |
+|---|---|
+| TTL | 30 minutes |
+| Redis key | `jrx:page:{sessionId}:{path}` |
+| Index key | `jrx:idx:{sessionId}` (Set of paths) |
+| CAS | Lua script via `EVAL` |
+| Serialization | Pluggable `StateSerializer` (Jackson or FST) |
+
+The Lua CAS script atomically checks the current version hash field and increments it on success:
+
+```lua
+local currentVer = tonumber(redis.call('hget', key, 'v') or '0')
+if currentVer == expectedVer then
+    redis.call('hset', key, 'data', newData, 'v', currentVer + 1)
+    redis.call('expire', key, 1800)
+    return 1
+else
+    return 0
+end
+```
+
+### `HybridStateStore`
+
+**Module:** `jreactive-store-redis`
+
+Two-tier store: L1 = `CaffeineStateStore` (RAM), L2 = `RedisStateStore`. This is the recommended configuration for production.
+
+| Operation | Behavior |
+|---|---|
+| `get` | Read L1 first; on miss, read L2 and promote to L1 (read-repair) |
+| `put` for `@StatefulRam` | Write L1 only; skip L2 entirely |
+| `put` for `@Stateful` | Write L1 immediately; write L2 synchronously or asynchronously |
+| `replace` for `@StatefulRam` | Delegate to L1 CAS only |
+| `replace` for `@Stateful` | CAS on L2 (strong consistency) or async write (high throughput) |
+
+```java
+new HybridStateStore(
+    new CaffeineStateStore(),    // L1
+    new RedisStateStore(...),    // L2
+    true                          // strongConsistency
+);
+```
+
+## Implementing a custom `StateStore`
+
+You can replace the built-in stores with any backend (PostgreSQL, DynamoDB, Hazelcast, etc.):
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.store.StateStore;
+
+public class PostgresStateStore implements StateStore {
+
+    private final DataSource dataSource;
+    private final ObjectMapper mapper;
+
+    public PostgresStateStore(DataSource dataSource, ObjectMapper mapper) {
+        this.dataSource = dataSource;
+        this.mapper = mapper;
+    }
+
+    @Override
+    public HtmlComponent get(String sessionId, String path) {
+        // SELECT data FROM jrx_state WHERE session_id = ? AND path = ?
+        // Deserialize with mapper
+        return null; // implement
+    }
+
+    @Override
+    public void put(String sessionId, String path, HtmlComponent component) {
+        // UPSERT INTO jrx_state ...
+    }
+
+    @Override
+    public boolean replace(String sessionId, String path,
+                           HtmlComponent component, long expectedVersion) {
+        // UPDATE jrx_state SET data = ?, version = version + 1
+        // WHERE session_id = ? AND path = ? AND version = ?
+        // Return affected rows > 0
+        return false; // implement
+    }
+
+    @Override
+    public void remove(String sessionId, String path) {
+        // DELETE FROM jrx_state WHERE session_id = ? AND path = ?
+    }
+
+    @Override
+    public void removeSession(String sessionId) {
+        // DELETE FROM jrx_state WHERE session_id = ?
+    }
+}
+```
+
+### Registering a custom store (Spring Boot)
+
+Declare a `@Bean` of type `StateStore`. JReactive's auto-configuration uses `@ConditionalOnMissingBean` and defers to your bean:
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class JrxConfig {
+
+    @Bean
+    public StateStore stateStore(DataSource ds, ObjectMapper mapper) {
+        return new PostgresStateStore(ds, mapper);
+    }
+}
+```
+
+## Related
+
+- [`@StatefulRam`](/api/annotations/statefulram) — routes to `CaffeineStateStore`
+- [`@Stateful`](/api/annotations/stateful) — routes to `RedisStateStore` (via `HybridStateStore`)
+- [`@Stateless`](/api/annotations/stateless) — bypasses `StateStore` entirely; state lives in a client token

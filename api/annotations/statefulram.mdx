@@ -1,0 +1,106 @@
+---
+title: "@StatefulRam"
+description: "Stores component state in a Caffeine in-memory cache. The default persistence strategy when no @Stateful or @Stateless annotation is present."
+---
+
+`@StatefulRam` marks a component to be stored exclusively in a Caffeine in-memory cache. It is the default strategy — if you do not annotate a component with `@Stateful` or `@Stateless`, `@StatefulRam` behavior applies automatically. Components annotated with `@StatefulRam` are never serialized to Redis, even when a Redis store is configured.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Behavior
+
+1. **L1 cache only.** `HybridStateStore.put()` checks for `@StatefulRam` and returns immediately after writing to Caffeine, skipping the Redis write entirely.
+2. **30-minute TTL.** Entries expire 30 minutes after last access. The TTL resets on every `@Call`.
+3. **10,000 max entries.** The Caffeine cache is bounded at 10,000 component instances (across all sessions and paths). When the limit is reached, Caffeine evicts the least-recently-used entries.
+4. **Automatic cleanup on eviction.** When a component is evicted, `val._unmountRecursive()` is called, triggering `onUnmount()` on the component and all its children.
+5. **CAS optimistic locking.** Concurrent `@Call` requests targeting the same component use `cache.asMap().compute()` for atomic compare-and-swap, preventing data races without explicit synchronization.
+6. **Lost on restart.** RAM state is not persisted. After a server restart, all component state is gone. Users will see a freshly initialized component.
+
+<Warning>
+  `@StatefulRam` components are not shared across pods. In a multi-instance deployment, a user whose request is routed to a different pod will start with a fresh component. Use `@Stateful` (Redis) if you need session affinity across multiple instances.
+</Warning>
+
+## When to use `@StatefulRam`
+
+- Development and single-server production deployments.
+- Components with heavy local interactivity where state does not need to survive restarts.
+- Paired with `@Client` for components that use client-side rendering but still need server-managed state.
+
+## Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/delta-test")
+@StatefulRam
+public class DeltaTestPage extends HtmlComponent {
+
+    @State
+    public List<String> items = new ArrayList<>();
+
+    @Call
+    public void addOne() {
+        items.add("Item #" + (items.size() + 1));
+    }
+
+    @Call
+    public void removeFirst() {
+        if (!items.isEmpty()) items.remove(0);
+    }
+
+    @Call
+    public void clearAll() {
+        items.clear();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <button @click="addOne()">Add</button>
+                <button @click="removeFirst()">Remove first</button>
+                <button @click="clearAll()">Clear</button>
+                <ul>
+                    {{#each items as item}}
+                        <li>{{item}}</li>
+                    {{/each}}
+                </ul>
+            </div>
+            """;
+    }
+}
+```
+
+## `CaffeineStateStore` implementation
+
+`CaffeineStateStore` is the backing implementation:
+
+```java
+public class CaffeineStateStore implements StateStore {
+    // 30-minute access expiry, 10,000 max entries
+    private final Cache<String, HtmlComponent> cache;
+
+    // Cache key: "{sessionId}::{path}"
+
+    // replace() uses cache.asMap().compute() for atomic CAS
+    public boolean replace(String sid, String path,
+                           HtmlComponent newComp, long expectedVersion) { ... }
+}
+```
+
+## Related
+
+- [`@Stateful`](/api/annotations/stateful) — Redis-backed persistence; survives restarts
+- [`@Stateless`](/api/annotations/stateless) — zero server memory; state in signed client token
+- [`StateStore`](/api/state-store) — the interface and all built-in implementations
+- [`@Client`](/api/annotations/client) — CSR mode; pairs naturally with `@StatefulRam`

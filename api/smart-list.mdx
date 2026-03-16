@@ -1,0 +1,236 @@
+---
+title: "SmartList"
+description: "Reactive ArrayList that fires granular delta events on mutation. Assign a SmartList to a @State List<E> field and JReactive sends only the changed element to the browser — no full re-render."
+---
+
+`SmartList<E>` extends `ArrayList<E>` and intercepts mutating methods to fire change events. The JReactive runtime subscribes to these events and pushes a minimal wire delta to the browser, updating only the affected DOM element instead of re-rendering the whole list.
+
+**Package:** `com.ciro.jreactive.smart`
+
+```java
+public class SmartList<E> extends ArrayList<E>
+```
+
+<Note>
+  You do not need to construct `SmartList` manually. When the framework processes a `@State List<E>` field, it wraps the raw `ArrayList` in a `SmartList` automatically. Declare your field as `List<E>` and assign a plain `ArrayList` — JReactive upgrades it at bind time.
+</Note>
+
+## Constructors
+
+```java
+public SmartList()
+public SmartList(Collection<? extends E> c)
+```
+
+Create an empty list or copy an existing collection into the smart list.
+
+## The `Change` record
+
+```java
+public record Change(String op, int index, Object item) {}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `op` | `String` | Operation name: `"ADD"`, `"REMOVE"`, `"SET"`, or `"CLEAR"`. |
+| `index` | `int` | Zero-based position in the list. `0` for `CLEAR`. |
+| `item` | `Object` | The element involved. `null` for `REMOVE` and `CLEAR`. |
+
+## Change event types
+
+| `op` | Trigger | Wire delta |
+|---|---|---|
+| `ADD` | `add(E)`, `add(int, E)`, `addAll(...)` | `{"op":"ADD","index":N,"item":{...}}` |
+| `REMOVE` | `remove(int)`, `remove(Object)`, `removeIf(...)`, `removeAll(...)` | `{"op":"REMOVE","index":N}` |
+| `SET` | `set(int, E)` | `{"op":"SET","index":N,"item":{...}}` |
+| `CLEAR` | `clear()` | `{"op":"CLEAR","index":0}` |
+
+## Methods
+
+### `add(E e)`
+
+```java
+@Override
+public boolean add(E e)
+```
+
+Appends the element to the end of the list and fires an `ADD` event at the resulting index.
+
+---
+
+### `add(int index, E element)`
+
+```java
+@Override
+public void add(int index, E element)
+```
+
+Inserts the element at the specified position and fires an `ADD` event.
+
+---
+
+### `remove(int index)`
+
+```java
+@Override
+public E remove(int index)
+```
+
+Removes the element at the given index and fires a `REMOVE` event.
+
+<ResponseField name="return value" type="E">
+  The removed element.
+</ResponseField>
+
+---
+
+### `remove(Object o)`
+
+```java
+@Override
+public boolean remove(Object o)
+```
+
+Removes the first occurrence of `o` by index and fires a `REMOVE` event at that index.
+
+<ResponseField name="return value" type="boolean">
+  `true` if the element was found and removed.
+</ResponseField>
+
+---
+
+### `set(int index, E element)`
+
+```java
+@Override
+public E set(int index, E element)
+```
+
+Replaces the element at the given index and fires a `SET` event with the new value. Use this for in-place updates — the browser updates only the one DOM node at `index`.
+
+<ResponseField name="return value" type="E">
+  The previous element at that index.
+</ResponseField>
+
+---
+
+### `clear()`
+
+```java
+@Override
+public void clear()
+```
+
+Clears all elements (if the list is non-empty) and fires a single `CLEAR` event. The browser removes all rendered list items.
+
+---
+
+### `subscribe(Consumer<Change> listener)`
+
+```java
+public void subscribe(Consumer<Change> listener)
+```
+
+Registers a listener that is called for every change event. The JReactive framework calls this internally to wire delta dispatch. You can also call it directly for custom side effects.
+
+<ParamField query="listener" type="Consumer<Change>" required>
+  Callback that receives a `Change` record describing the mutation.
+</ParamField>
+
+---
+
+### `unsubscribe(Consumer<Change> listener)`
+
+```java
+public void unsubscribe(Consumer<Change> listener)
+```
+
+Removes a previously registered listener.
+
+## Wire delta format
+
+The framework serializes each `Change` as a JSON delta sent over the WebSocket:
+
+```json
+// ADD at index 2
+{ "op": "ADD", "index": 2, "item": "New task" }
+
+// SET (in-place update) at index 0
+{ "op": "SET", "index": 0, "item": "Updated task" }
+
+// REMOVE at index 1
+{ "op": "REMOVE", "index": 1 }
+
+// CLEAR all
+{ "op": "CLEAR", "index": 0 }
+```
+
+## Example
+
+```java
+@Route(path = "/tasks")
+@Client
+@StatefulRam
+public class TaskPage extends HtmlComponent {
+
+    // Declare as List<String> — framework upgrades to SmartList automatically
+    @State
+    public List<String> tasks = new ArrayList<>();
+
+    @Override
+    public void onInit() {
+        tasks.add("Design database");
+        tasks.add("Configure Spring Boot");
+        tasks.add("Build UI components");
+    }
+
+    @Call
+    public void addTask(String task) {
+        // Fires ADD delta — browser appends one <li>, no full re-render
+        tasks.add(task);
+    }
+
+    @Call
+    public void editFirst(String text) {
+        if (!tasks.isEmpty()) {
+            // Fires SET delta — browser updates only the first <li>
+            tasks.set(0, text);
+        }
+    }
+
+    @Call
+    public void removeFirst() {
+        if (!tasks.isEmpty()) {
+            // Fires REMOVE delta — browser removes only the first <li>
+            tasks.remove(0);
+        }
+    }
+
+    @Call
+    public void clearAll() {
+        // Fires CLEAR delta — browser removes all list items
+        tasks.clear();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h2>Tasks: {{tasks.size}}</h2>
+                <ul>
+                    {{#each tasks as task}}
+                        <li>{{task}}</li>
+                    {{/each}}
+                </ul>
+                <button @click="addTask('New task')">Add</button>
+                <button @click="removeFirst()">Remove first</button>
+                <button @click="clearAll()">Clear</button>
+            </div>
+            """;
+    }
+}
+```
+
+<Tip>
+  Open **DevTools → Network → WS** while interacting with the page. You will see individual `{"op":"ADD"}` / `{"op":"REMOVE"}` messages for each mutation, confirming that JReactive is not re-sending the whole list.
+</Tip>

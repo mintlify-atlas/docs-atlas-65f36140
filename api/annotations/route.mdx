@@ -1,0 +1,142 @@
+---
+title: "@Route"
+description: "Maps an HtmlComponent class to a URL path. The route registry discovers @Route classes at startup and dispatches incoming requests to the correct component."
+---
+
+`@Route` maps a component class to a URL path. The route registry scans the classpath at application startup, discovers every class annotated with `@Route`, and registers it. When a request arrives, the registry matches the path and produces a new component instance.
+
+**Package:** `com.ciro.jreactive.router`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Annotation elements
+
+<ParamField body="path" type="String" required>
+  The URL path this component handles. Must start with `/`. Supports `{placeholder}` segments for dynamic path parameters. Examples: `"/about"`, `"/users/{id}"`, `"/shop/{category}/{slug}"`.
+</ParamField>
+
+## Route discovery
+
+### Spring Boot
+
+`RouteRegistry` (from `jreactive-starter-spring`) uses `ClassPathScanningCandidateComponentProvider` to find all `@Route` classes under the application's base package at startup. The factory creates instances via `AutowireCapableBeanFactory.createBean()`, so Spring injects `@Autowired` fields even on classes that are not themselves Spring beans.
+
+At least one route with `path = "/"` must be registered, otherwise the application fails to start.
+
+### Standalone
+
+`SimpleRouteRegistry` (from `jreactive-standalone`) is populated manually:
+
+```java
+SimpleRouteRegistry registry = new SimpleRouteRegistry();
+registry.add("/", HomePage::new);
+registry.add("/users/{id}", UserPage::new);
+```
+
+## Path parameters
+
+Use `{placeholder}` syntax to define dynamic segments. The extracted values are accessible in the component via `@Param` fields:
+
+```java
+@Route(path = "/users/{id}")
+public class UserPage extends HtmlComponent {
+
+    @Param("id")
+    public String userId;
+
+    // userId is populated before onInit() is called
+}
+```
+
+See [`@Param`](/api/annotations/param) for full details.
+
+## Class inheritance
+
+Since `@Route` is not `@Inherited`, it is not automatically inherited by subclasses. Each concrete page class must declare its own `@Route`. You can share common behavior via an abstract base class:
+
+```java
+// Abstract base — no @Route here
+@Layout(MainLayout.class)
+public abstract class AppPage extends HtmlComponent {}
+
+// Concrete page — declares its own @Route
+@Route(path = "/about")
+public class AboutPage extends AppPage {
+    // inherits @Layout from AppPage
+}
+```
+
+## Examples
+
+### Static route
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/about")
+public class AboutPage extends HtmlComponent {
+
+    @Override
+    protected String template() {
+        return "<h1>About us</h1>";
+    }
+}
+```
+
+### Dynamic route with path parameter
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Param;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/products/{slug}")
+@StatefulRam
+public class ProductPage extends HtmlComponent {
+
+    @Param("slug")
+    public String slug;
+
+    @State
+    public String productName = "";
+
+    @Override
+    public void onInit() {
+        // slug is available here
+        productName = productService.findBySlug(slug).getName();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h1>{{productName}}</h1>
+            </div>
+            """;
+    }
+}
+```
+
+### Root route (required)
+
+```java
+@Route(path = "/")
+public class HomePage extends AppPage {
+
+    @Override
+    protected String template() {
+        return "<h1>Welcome</h1>";
+    }
+}
+```
+
+## Related
+
+- [`@Param`](/api/annotations/param) — injects path and query parameters into component fields
+- [`@Layout`](/api/annotations/layout) — wraps the component in a layout shell
+- [`RouteProvider`](/api/route-provider) — the interface implemented by `RouteRegistry` and `SimpleRouteRegistry`

@@ -1,0 +1,137 @@
+---
+title: "@DomMode"
+description: "Controls the DOM ownership strategy for a component. CLIENT_MANAGED (default) uses JS delta binding; SERVER_OWNED sends a fresh full HTML fragment after every @Call."
+---
+
+`@DomMode` controls how JReactive applies state changes to the browser DOM after a `@Call`. By default, the JS runtime owns the DOM and applies targeted delta updates. With `SERVER_OWNED`, the server re-renders the full component HTML and the runtime replaces the DOM in one shot using Idiomorph morphing.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Annotation elements
+
+<ParamField body="value" type="JrxDomMode" default="JrxDomMode.CLIENT_MANAGED">
+  The DOM ownership mode. Accepted values:
+
+  - `JrxDomMode.CLIENT_MANAGED` — JS runtime manages DOM updates via targeted delta binding. Each changed `@State` field produces one entry in the `batch` response array.
+  - `JrxDomMode.SERVER_OWNED` — server evaluates all template logic (`{{#if}}`, `{{#each}}`, `{{binding}}`) and sends the complete rendered HTML fragment. The JS runtime morphs the existing DOM to match.
+</ParamField>
+
+## `JrxDomMode` enum
+
+```java
+public enum JrxDomMode {
+    /** JS manages DOM updates via delta binding (default). */
+    CLIENT_MANAGED,
+    /** Server sends complete HTML fragment after every @Call. */
+    SERVER_OWNED
+}
+```
+
+## CLIENT_MANAGED (default)
+
+`CLIENT_MANAGED` is the default mode even without the annotation. After a `@Call`:
+
+1. The server computes a delta batch: only fields whose values changed since the snapshot.
+2. The response `batch` array contains `{ "k": fieldName, "v": newValue }` entries.
+3. The JS runtime applies each entry to the DOM using pre-compiled binding expressions — no full HTML regeneration.
+
+This produces minimal network traffic and avoids full DOM replacement, preserving focus state, animations, and scroll positions.
+
+## SERVER_OWNED
+
+With `@DomMode(JrxDomMode.SERVER_OWNED)`, after a `@Call`:
+
+1. The server calls `page._clearCache()` then `page.render()` to produce fresh HTML.
+2. The full rendered HTML is returned in the response `html` field.
+3. The JS runtime uses Idiomorph to morph the existing DOM to match the new HTML, which preserves the DOM tree structure where possible.
+
+The response shape changes from a delta batch to a full HTML payload:
+
+```json
+{
+  "ok": true,
+  "html": "<div>...</div>"
+}
+```
+
+## When to use `SERVER_OWNED`
+
+- Components with complex conditional logic (`{{#if}}`, `{{#each}}`) that would require large delta batches.
+- Server-computed HTML that cannot be replicated by a client-side template.
+- Cases where the JS runtime's delta binding would be more complex than a full re-render.
+- HTML-on-the-wire architectures where you prefer server authority over every pixel.
+
+<Tip>
+  `SERVER_OWNED` pairs naturally with `@Stateless` for fully server-driven, zero-memory-footprint pages.
+</Tip>
+
+## Examples
+
+### SERVER_OWNED with @Stateless
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.JrxDomMode;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.DomMode;
+import com.ciro.jreactive.annotations.Stateless;
+import com.ciro.jreactive.router.Route;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/server-owned")
+@DomMode(JrxDomMode.SERVER_OWNED)
+@Stateless
+public class ServerOwnedPage extends HtmlComponent {
+
+    @State public int counter = 0;
+    @State public boolean showSecret = false;
+    @State public List<String> logs = new ArrayList<>(List.of("Server started"));
+
+    @Call
+    public void interact() {
+        counter++;
+        showSecret = !showSecret;
+        logs.add("Event #" + counter);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h2>Counter: {{counter}}</h2>
+
+                {{#if showSecret}}
+                    <p>Secret revealed!</p>
+                {{/if}}
+                {{#if !showSecret}}
+                    <p>Secret hidden</p>
+                {{/if}}
+
+                <button @click="interact()">Interact</button>
+
+                <ul>
+                    {{#each logs as log}}
+                        <li>{{log}}</li>
+                    {{/each}}
+                </ul>
+            </div>
+            """;
+    }
+}
+```
+
+### Explicit CLIENT_MANAGED (no annotation needed)
+
+You never need to annotate a component with `@DomMode(JrxDomMode.CLIENT_MANAGED)` — it is the default. The annotation is only required when switching to `SERVER_OWNED`.
+
+## Related
+
+- [`@Stateless`](/api/annotations/stateless) — zero server memory; pairs well with `SERVER_OWNED`
+- [`@Call`](/api/annotations/call) — the response format differs between modes
+- [HtmlComponent](/api/html-component) — `_clearCache()` is called before re-rendering in `SERVER_OWNED` mode

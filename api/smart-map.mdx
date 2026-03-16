@@ -1,0 +1,233 @@
+---
+title: "SmartMap"
+description: "Reactive HashMap that fires PUT, REMOVE, and CLEAR delta events on mutation. Use it with @State Map<K,V> fields to push key-level updates to the browser without full re-renders."
+---
+
+`SmartMap<K, V>` extends `HashMap<K, V>` and intercepts mutating methods to fire change events. The JReactive runtime subscribes to these events and pushes a minimal JSON delta over the WebSocket keyed by the changed map entry.
+
+**Package:** `com.ciro.jreactive.smart`
+
+```java
+public class SmartMap<K, V> extends HashMap<K, V>
+```
+
+<Note>
+  You do not need to construct `SmartMap` manually. When the framework processes a `@State Map<K,V>` field, it wraps the raw `HashMap` in a `SmartMap` automatically. Declare your field as `Map<K,V>` and assign a plain `HashMap`.
+</Note>
+
+## Constructors
+
+```java
+public SmartMap()
+public SmartMap(Map<? extends K, ? extends V> m)
+```
+
+Create an empty map or copy an existing map into the smart map.
+
+## The `Change` record
+
+```java
+public record Change(String op, Object key, Object value) {}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `op` | `String` | Operation name: `"PUT"`, `"REMOVE"`, or `"CLEAR"`. |
+| `key` | `Object` | The map key involved. `null` for `CLEAR`. |
+| `value` | `Object` | The value associated with the key. `null` for `REMOVE` and `CLEAR`. |
+
+## Change event types
+
+| `op` | Trigger | Wire delta |
+|---|---|---|
+| `PUT` | `put(K, V)`, `putAll(...)`, `update(K)` | `{"op":"PUT","key":"k","value":{...}}` |
+| `REMOVE` | `remove(Object)` | `{"op":"REMOVE","key":"k"}` |
+| `CLEAR` | `clear()` | `{"op":"CLEAR"}` |
+
+## Methods
+
+### `put(K key, V value)`
+
+```java
+@Override
+public V put(K key, V value)
+```
+
+Associates `value` with `key` (inserting or replacing) and fires a `PUT` event with the key and new value.
+
+<ParamField query="key" type="K" required>
+  The map key.
+</ParamField>
+
+<ParamField query="value" type="V" required>
+  The value to associate with the key.
+</ParamField>
+
+<ResponseField name="return value" type="V">
+  The previous value associated with the key, or `null` if there was none.
+</ResponseField>
+
+---
+
+### `remove(Object key)`
+
+```java
+@Override
+public V remove(Object key)
+```
+
+Removes the mapping for `key` (if present) and fires a `REMOVE` event. If the key is not in the map, no event is fired.
+
+<ResponseField name="return value" type="V">
+  The previous value associated with the key, or `null` if there was no mapping.
+</ResponseField>
+
+---
+
+### `clear()`
+
+```java
+@Override
+public void clear()
+```
+
+Clears all entries (if non-empty) and fires a single `CLEAR` event.
+
+---
+
+### `update(K key)`
+
+```java
+public void update(K key)
+```
+
+Forces a re-render delta for a key that is already in the map. Fires a `PUT` event with the current value for that key. Use this when you have mutated the value object in-place (by reference) and need the browser to reflect the new state.
+
+<ParamField query="key" type="K" required>
+  The key whose associated value should be re-pushed. If the key is not present in the map, no event is fired.
+</ParamField>
+
+```java
+// In-place mutation of a value object:
+map.get("user").name = "Alice Updated";
+map.update("user");  // fires PUT with updated value
+```
+
+---
+
+### `putAll(Map<? extends K, ? extends V> m)`
+
+```java
+@Override
+public void putAll(Map<? extends K, ? extends V> m)
+```
+
+Inserts or updates all entries from `m`, firing one `PUT` event per entry.
+
+---
+
+### `subscribe(Consumer<Change> listener)`
+
+```java
+public void subscribe(Consumer<Change> listener)
+```
+
+Registers a listener for change events.
+
+<ParamField query="listener" type="Consumer<Change>" required>
+  Callback that receives a `Change` record describing the mutation.
+</ParamField>
+
+---
+
+### `unsubscribe(Consumer<Change> listener)`
+
+```java
+public void unsubscribe(Consumer<Change> listener)
+```
+
+Removes a previously registered listener.
+
+## Wire delta format
+
+```json
+// PUT (insert or update)
+{ "op": "PUT", "key": "driver-42", "value": { "lat": 4.61, "lng": -74.08, "name": "Driver 42" } }
+
+// REMOVE
+{ "op": "REMOVE", "key": "driver-42" }
+
+// CLEAR
+{ "op": "CLEAR" }
+```
+
+## Example
+
+```java
+@Route(path = "/fleet")
+@Client
+@StatefulRam
+public class FleetPage extends HtmlComponent {
+
+    public static class DriverLocation implements Serializable {
+        public double lat;
+        public double lng;
+        public String name;
+
+        public DriverLocation(double lat, double lng, String name) {
+            this.lat = lat;
+            this.lng = lng;
+            this.name = name;
+        }
+    }
+
+    // Declare as Map<String, DriverLocation> — framework upgrades to SmartMap
+    @State
+    public Map<String, DriverLocation> drivers = new HashMap<>();
+
+    @Call
+    public void addDriver(String id) {
+        // Fires PUT delta — browser adds the new entry
+        drivers.put(id, new DriverLocation(4.61, -74.08, "Driver " + id));
+    }
+
+    @Call
+    public void updatePosition(String id, double lat, double lng) {
+        DriverLocation loc = drivers.get(id);
+        if (loc != null) {
+            loc.lat = lat;
+            loc.lng = lng;
+            // In-place mutation: call update() to fire the PUT delta
+            drivers.update(id);
+        }
+    }
+
+    @Call
+    public void removeDriver(String id) {
+        // Fires REMOVE delta — browser removes the entry
+        drivers.remove(id);
+    }
+
+    @Call
+    public void clearFleet() {
+        // Fires CLEAR delta
+        drivers.clear();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div class="fleet">
+                <h2>Active drivers: {{drivers.size}}</h2>
+                <ul>
+                    {{#each drivers as entry}}
+                        <li>{{entry.key}}: {{entry.value.name}} ({{entry.value.lat}}, {{entry.value.lng}})</li>
+                    {{/each}}
+                </ul>
+                <button @click="addDriver('d-1')">Add driver</button>
+                <button @click="clearFleet()">Clear all</button>
+            </div>
+            """;
+    }
+}
+```

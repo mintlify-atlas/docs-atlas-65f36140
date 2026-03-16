@@ -1,0 +1,328 @@
+---
+title: "How it works"
+description: "The server-driven rendering model, WebSocket protocol, and AOT compilation pipeline"
+---
+
+JReactive follows a server-driven architecture: all state lives on the JVM, and the browser is a thin rendering client. This page explains every layer from the initial HTTP request to the DOM update you see on screen.
+
+## Data flow overview
+
+| Step | Who | What happens |
+|---|---|---|
+| 1. HTTP request | Browser → Spring Boot | `PathInterceptor` matches the URL to a `@Route` component via `RouteRegistry` |
+| 2. Initial render | `JrxHttpApi.render()` | Renders the component tree to HTML, injects the layout via `@Layout`, and returns the full page |
+| 3. WebSocket connect | Browser → `JReactiveSocketHandler` | JS runtime opens a SockJS connection to `/jrx-ws` |
+| 4. Initial snapshot | `JrxPushHub.snapshot()` | Sends all binding key-value pairs as a batched JSON envelope with a sequence number |
+| 5. User interaction | Browser → `POST /call/{method}` | `JrxHttpApi.call()` deserializes args, runs Bean Validation, checks rate limit, invokes `@Call` method |
+| 6. State change | `ReactiveVar.onChange()` | `JrxPushHub` listener fires; broadcasts the changed binding (or a structural delta for smart collections) |
+| 7. DOM update | Browser | JS runtime receives the update, locates the matching DOM node via binding key, and runs Idiomorph morphing |
+
+---
+
+## The rendering cycle
+
+<Steps>
+
+<Step title="Template parsing">
+
+Each `HtmlComponent` subclass overrides `template()` and returns an HTML string with JReactive directives:
+
+- `{{variableName}}` — mustache binding
+- `{{#if condition}}` / `{{/if}}` — conditional block
+- `{{#each list as item}}` / `{{/each}}` — list block
+- `@click="methodName(arg)"` — event directive
+- `name="fieldName"` — two-way input binding
+
+At `mvn compile`, `TemplateProcessor` (the `jreactive-apt` annotation processor) calls `JrxParser.parse()` on the string literal returned from `template()`. `JrxParser` produces a tree of `JrxNode` objects:
+
+| Node type | Class | Represents |
+|---|---|---|
+| Element | `ElementNode` | Any HTML tag (`<div>`, `<input>`, etc.) |
+| Component | `ComponentNode` | A child component tag (`<CounterLeaf />`) |
+| Text | `TextNode` | Raw text, including `{{...}}` expressions |
+| Conditional | `IfNode` | `{{#if}}` blocks |
+| Loop | `EachNode` | `{{#each}}` blocks |
+
+</Step>
+
+<Step title="AOT accessor generation">
+
+`TemplateProcessor.generateJavaAccessor()` writes a `ClassName__Accessor` source file for every `HtmlComponent`. The accessor implements `ComponentAccessor<T>` and is registered in `AccessorRegistry` via a static initializer.
+
+The generated class contains three zero-reflection methods:
+
+- `write(T component, String path, Object value)` — sets a `@State` or `@Bind` field by dot-path (e.g., `form.email`)
+- `read(T component, String path)` — returns a field value by dot-path
+- `call(T component, String methodName, Object... args)` — invokes an `@Call` method with pre-cast arguments
+
+It also contains:
+
+- `getAst()` — returns the pre-compiled `List<JrxNode>` so `AstComponentEngine` skips parsing at runtime
+- `getScopedCss()` — returns the scoped, minified CSS string produced by `CssScoper`
+
+</Step>
+
+<Step title="HTML + binding metadata generation">
+
+At runtime, `AstComponentEngine.render()` walks the AST:
+
+1. Calls `ctx._syncState()` to push any field changes into their `ReactiveVar` wrappers.
+2. Builds a namespaced binding map: root component fields are registered as `fieldName` and `ComponentId.fieldName`; child component fields are registered as `ChildId.fieldName`.
+3. For `IfNode` and `EachNode` in normal mode, emits `<template data-if="...">` and `<template data-each="...">` blueprints that the JS runtime evaluates reactively.
+4. In `@DomMode(SERVER_OWNED)` mode, evaluates conditions and loops in Java and emits plain HTML.
+5. Resolves `{{...}}` text nodes and emits an `<!--jrx:originalExpression-->` comment before the resolved value. The JS runtime uses the comment to re-bind the text node to the live store.
+6. Prefixes `name` attributes on `<input>` elements with the component's namespace so two-way binding works across nested components.
+
+The final HTML is a `ComponentEngine.Rendered` record containing the HTML string and the complete binding map.
+
+</Step>
+
+</Steps>
+
+---
+
+## WebSocket protocol
+
+JReactive uses SockJS as the transport layer, managed by `JReactiveSocketHandler` on the Spring side.
+
+### Initial snapshot
+
+When the JS runtime connects, `JrxProtocolHandler.onOpen()` (or `JrxPushHub.subscribe()` in push-hub mode) sends all current binding values as a single batched envelope:
+
+```json
+{
+  "seq": 1,
+  "batch": [
+    { "k": "count",         "v": 0 },
+    { "k": "CounterPage-1.count", "v": 0 }
+  ]
+}
+```
+
+Every message carries a monotonically increasing `seq` number. If a client reconnects and sends a `since` header, `JrxPushHub.poll(since)` replays missed messages from the in-memory ring buffer rather than sending a full snapshot.
+
+### Delta patches on state change
+
+After a `@Call` method runs and mutates a `@State` field, `_syncState()` detects the change (by comparing the new value against the snapshot captured before the call), updates the `ReactiveVar`, and triggers its `onChange` listeners.
+
+`JrxPushHub` broadcasts a single-key patch:
+
+```json
+{
+  "seq": 2,
+  "batch": [
+    { "k": "count", "v": 1 }
+  ]
+}
+```
+
+The JS runtime receives this, looks up `count` in its store, updates the store value, and the DOM binding re-evaluates.
+
+### Sequence recovery
+
+If a WebSocket connection drops and reconnects within the buffer window, the client sends its last known `seq`. `JrxPushHub.poll(since)` replays only the messages the client missed, avoiding a full snapshot round-trip.
+
+---
+
+## Smart collections
+
+Plain `List`, `Set`, and `Map` fields annotated with `@State` are automatically wrapped in `SmartList`, `SmartSet`, or `SmartMap` during `buildBindings()` in `HtmlComponent`. These wrappers override mutating methods and fire granular change events instead of replacing the entire collection.
+
+### Event model
+
+`SmartList` fires `Change` records with three fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `op` | `String` | `"ADD"`, `"REMOVE"`, `"SET"`, or `"CLEAR"` |
+| `index` | `int` | Position in the list |
+| `item` | `Object` | The element added or replaced (`null` for removes) |
+
+`JrxPushHub` and `JrxProtocolHandler` subscribe to these events and broadcast structural delta packets:
+
+```json
+{
+  "seq": 3,
+  "batch": [
+    {
+      "k": "fruits",
+      "delta": true,
+      "type": "list",
+      "changes": [{ "op": "ADD", "index": 2, "item": "mango" }]
+    }
+  ]
+}
+```
+
+The JS runtime applies the delta directly to the DOM — no full list re-render. For a 1,000-item list, adding one item sends a single `ADD` event, not 1,000 items.
+
+<AccordionGroup>
+
+<Accordion title="SmartList operations">
+
+`SmartList<E>` extends `ArrayList<E>`. All mutating methods — `add`, `add(index, element)`, `remove(int)`, `remove(Object)`, `set`, `clear`, `addAll`, `removeAll`, `removeIf`, `retainAll` — fire `Change` events. Listener registration and cleanup use `CopyOnWriteArrayList` to avoid locking on the hot broadcast path.
+
+</Accordion>
+
+<Accordion title="SmartSet and SmartMap">
+
+`SmartSet` and `SmartMap` follow the same pattern with their own `Change` record types. `SmartMap` fires `PUT` and `REMOVE` operations with key and value. The JS runtime dispatches map deltas to the binding key using the same `broadcastDelta` pathway.
+
+</Accordion>
+
+<Accordion title="Automatic wrapping">
+
+You never need to instantiate `SmartList` directly. Declare a plain `List<String>`:
+
+```java
+@State
+public List<String> fruits = new ArrayList<>();
+```
+
+`HtmlComponent.buildBindings()` calls `wrapInSmartType(raw)` and replaces the field value with a `SmartList` backed by your original list. The wrapper is transparent — standard Java list operations work unchanged.
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## The `@Call` HTTP API
+
+Every `@Call`-annotated method is reachable at:
+
+```
+POST /call/{ComponentId.methodName}
+```
+
+For root-level components, the short form `methodName` also resolves. Requests are handled by `JrxHttpApi.call()`.
+
+### Request lifecycle
+
+```
+Browser  →  POST /call/CounterPage-1.increment
+             body: { "args": [] }
+
+JrxHttpApi:
+  1. pageResolver.getPage(sessionId, path)     → HtmlComponent instance
+  2. collectCallables(page)                    → Map<String, Method>
+  3. Deserialize args                           → Object[]
+  4. CallGuard.tryConsume(sessionId:method)    → rate limit check (60 req/s)
+  5. CallGuard.validateParams(owner, method, args) → Bean Validation
+  6. AccessorRegistry.get(comp).call(comp, name, args) → invoke method
+  7. comp._syncState()                          → detect field changes
+  8. Return { "ok": true }
+```
+
+### Bean Validation
+
+Parameter types annotated with `@Valid` trigger full constraint checking before the method executes. If any constraint is violated, the method is never called and a structured error response is returned:
+
+```json
+{
+  "ok": false,
+  "code": "VALIDATION",
+  "error": "The name is required",
+  "violations": [
+    {
+      "param": "register.form.name",
+      "path": "form.name",
+      "message": "The name is required",
+      "constraint": "NotBlank"
+    }
+  ]
+}
+```
+
+### Rate limiting
+
+`CallGuard` uses Bucket4j token buckets cached in Caffeine (up to 50,000 entries, evicted after 1 hour of inactivity). The default limit is 60 calls per second per `sessionId:methodName` key. When the limit is exceeded, the response is:
+
+```json
+{ "ok": false, "code": "RATE_LIMIT", "error": "Too many calls, please wait a moment" }
+```
+
+### Ref-based dispatch
+
+If a method call targets a child component by ref (e.g., `miModal.open`), `JrxHttpApi` calls `page._resolveRef("miModal")` to translate the local alias to the real component ID (e.g., `ModalTestPage-JModal-0`), then re-resolves the callable map entry.
+
+---
+
+## AOT compilation pipeline
+
+The `jreactive-apt` annotation processor (`TemplateProcessor`) runs during `mvn compile` and processes every class that extends `HtmlComponent` or overrides `template()`.
+
+<AccordionGroup>
+
+<Accordion title="What the processor generates">
+
+For a class `CounterPage`, the processor produces:
+
+1. **`CounterPage__Accessor.java`** — zero-reflection accessor registered in `AccessorRegistry`. Contains `write`, `read`, `call`, `getAst`, and `getScopedCss` methods.
+
+2. **`static/jrx/templates/com_example_myapp_CounterPage.html`** — the raw HTML template, written to `CLASS_OUTPUT` so it can be served as a static resource.
+
+3. **`static/js/jrx/com_example_myapp_CounterPage.jrx.js`** — a pre-compiled JS template registered on `window.JRX_RENDERERS`. Used by `@Client` components for client-side rendering.
+
+</Accordion>
+
+<Accordion title="Template validation at compile time">
+
+Before generating any output, `TemplateProcessor.validateTemplateConnections()` checks:
+
+- Every `{{variable}}` reference in the template exists as a `@State` or `@Bind` field.
+- Every `@click="method()"` event references a method annotated with `@Call`.
+- Every `ref="alias"` used in method calls exists in the template.
+
+Violations are emitted as `ERROR`-level compiler diagnostics, so typos in templates fail the build rather than silently rendering incorrectly at runtime.
+
+</Accordion>
+
+<Accordion title="Scoped CSS">
+
+If a file named `ClassName.css` exists next to the Java source file, `CssScoper` prefixes every selector with `[jrx-sc-ClassName]` at compile time. The scoped CSS string is embedded in `getScopedCss()` in the accessor. At runtime, `HtmlComponent._getBundledResources()` injects a `<style data-resource="ClassName">` block exactly once per component class per render session.
+
+</Accordion>
+
+<Accordion title="Pre-compiled AST">
+
+The AST is serialized as Java code inside `getAst()`. At runtime, `AstComponentEngine` calls `AST_CACHE.computeIfAbsent(clazz, k -> acc.getAst())`. If the accessor returns a non-null AST, the template string is never parsed again — the component pays the parsing cost exactly once across the entire process lifetime.
+
+If no accessor exists (e.g., a class compiled without `jreactive-apt`), the engine falls back to `JrxParser.parse(ctx.template())` on each first render.
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## DOM morphing with Idiomorph
+
+The JReactive JS runtime never replaces DOM subtrees wholesale. Instead, it calls [Idiomorph](https://github.com/bigskysoftware/idiomorph) to morph the existing DOM toward the new HTML. Idiomorph matches elements by `id` first, then by structural similarity, preserving:
+
+- Input focus and cursor position
+- Scroll offsets within scrollable elements
+- Pending input values that have not yet triggered a `@call`
+- CSS transition states
+
+When `JrxPushHub` sends a binding update, the runtime locates the text node or attribute bound to that key using the `<!--jrx:expression-->` comment markers and the `data-jrx-client` attributes, updates only the affected nodes, and runs Idiomorph only when structural changes require it.
+
+---
+
+## SPA router
+
+JReactive includes a client-side router that intercepts anchor clicks and back/forward navigation without full page reloads.
+
+### How it works
+
+1. Any `<a>` element with the `data-router` attribute is intercepted by the JS runtime.
+2. The runtime makes a `GET` request with the `X-Partial: true` header.
+3. `PathInterceptor` on the server detects the header and routes to `JrxHttpApi.render()` with `renderLayout = false`.
+4. The server returns only the page component HTML (no layout shell), prefixed with a `<script>` tag that sets `window.__JRX_URL_PARAMS__`.
+5. The runtime morphs the `<main id="app">` content using Idiomorph, updates the URL with `History.pushState`, and re-establishes the WebSocket subscription for the new component.
+
+```html Example nav link
+<a href="/users/10" data-router>View profile</a>
+```
+
+`History.popstate` events (browser back/forward) are also handled, replaying the partial fetch for the previous URL.

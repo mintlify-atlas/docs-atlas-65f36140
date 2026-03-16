@@ -1,0 +1,164 @@
+---
+title: "EventBus"
+description: "In-process pub/sub bus for cross-component communication. Components can emit named events with a payload and subscribe to them anywhere in the same JVM."
+---
+
+`EventBus` provides a simple in-process publish/subscribe mechanism. It is useful when two components that do not share a parent–child relationship need to communicate — for example, a navigation component emitting a route change that a sidebar badge should reflect.
+
+**Package:** `com.ciro.jreactive`
+
+```java
+public class EventBus
+```
+
+<Warning>
+  `EventBus` is **in-process only**. Events do not cross JVM boundaries or WebSocket sessions. For multi-node deployments, use a distributed message broker (e.g., Redis Pub/Sub) and bridge events into the bus manually from a shared `@Component`.
+</Warning>
+
+## Constructor
+
+`EventBus` has a default no-arg constructor. In a Spring Boot application, register it as a bean so components can inject a shared instance:
+
+```java
+@Configuration
+public class JrxConfig {
+
+    @Bean
+    public EventBus eventBus() {
+        return new EventBus();
+    }
+}
+```
+
+Or create a plain singleton if you are not using Spring:
+
+```java
+public static final EventBus BUS = new EventBus();
+```
+
+## Methods
+
+### `on(String event, Consumer<T> handler)`
+
+```java
+public <T> void on(String event, Consumer<T> handler)
+```
+
+Registers a handler for the named event. Multiple handlers can be registered for the same event name; all of them are called in registration order when the event fires.
+
+<ParamField query="event" type="String" required>
+  The event name. Use a consistent naming convention such as `"user.created"` or `"cart.updated"`.
+</ParamField>
+
+<ParamField query="handler" type="Consumer<T>" required>
+  The callback that receives the event payload. The type parameter `T` is unchecked at runtime — the caller is responsible for ensuring the payload type matches.
+</ParamField>
+
+Handlers are stored in a `CopyOnWriteArrayList` per event, so registering a new handler is safe from any thread and concurrent iteration during `emit()` is non-blocking.
+
+<Note>
+  There is currently no `off()` or unsubscribe method on `EventBus`. If you need to stop receiving events (e.g., in `onUnmount()`), use a flag:
+
+  ```java
+  private volatile boolean mounted = false;
+
+  @Override protected void onMount() {
+      mounted = true;
+      bus.on("data.refresh", payload -> {
+          if (mounted) handleRefresh(payload);
+      });
+  }
+
+  @Override protected void onUnmount() {
+      mounted = false;
+  }
+  ```
+</Note>
+
+---
+
+### `emit(String event, Object payload)`
+
+```java
+public void emit(String event, Object payload)
+```
+
+Invokes all handlers registered for `event`, passing `payload` to each. If no handlers are registered for the event, the call is a no-op.
+
+<ParamField query="event" type="String" required>
+  The event name to fire.
+</ParamField>
+
+<ParamField query="payload" type="Object" required>
+  The data to pass to handlers. Pass `null` for signal-only events that carry no data.
+</ParamField>
+
+Handlers are called synchronously on the calling thread. If a handler throws, the exception propagates to the caller of `emit()` and subsequent handlers are not called.
+
+## Cross-component communication example
+
+The following example shows a notification banner component that listens for events emitted by other parts of the application.
+
+```java
+// Shared bus bean (injected by Spring)
+@Component
+public class NotificationBanner extends HtmlComponent {
+
+    @Autowired
+    private EventBus bus;
+
+    @State
+    public String message = "";
+
+    @State
+    public boolean visible = false;
+
+    @Override
+    public void onMount() {
+        bus.on("notification.show", (String msg) -> {
+            message = msg;
+            visible = true;
+            updateState("message");
+            updateState("visible");
+        });
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div class="banner" data-if="visible">
+                <p>{{message}}</p>
+            </div>
+            """;
+    }
+}
+```
+
+Another component (e.g., a form page) emits the event after saving:
+
+```java
+@Component
+public class UserFormPage extends HtmlComponent {
+
+    @Autowired
+    private EventBus bus;
+
+    @Call
+    public void save(UserForm form) {
+        userService.save(form);
+        bus.emit("notification.show", "User saved successfully");
+    }
+
+    // ...
+}
+```
+
+## Event naming conventions
+
+<Tip>
+  Use dot-separated namespaced names to avoid collisions between modules:
+
+  - `"user.created"`, `"user.deleted"`
+  - `"cart.item.added"`, `"cart.cleared"`
+  - `"notification.show"`, `"notification.hide"`
+</Tip>

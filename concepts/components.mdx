@@ -1,0 +1,222 @@
+---
+title: "Components"
+description: "HtmlComponent is the building block of every JReactive UI. Learn the lifecycle, annotations, composition, and slot patterns."
+---
+
+Every JReactive UI element — from a single clock widget to a full page — is a `HtmlComponent`. You extend this class, declare reactive fields, write a template, and JReactive handles the rest: initial render, WebSocket hydration, and incremental DOM updates.
+
+## Extending `HtmlComponent`
+
+`HtmlComponent` lives in `com.ciro.jreactive`. You extend it directly for reusable leaf components, or via a base page class when you want all pages to share a common layout.
+
+```java
+package com.example.myapp;
+
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.State;
+import static com.ciro.jreactive.Type.$;
+
+public class CounterLeaf extends HtmlComponent {
+
+    @State
+    public int count = 0;
+
+    @Call
+    public void increment() {
+        count++;
+    }
+
+    @Call
+    public void reset() {
+        count = 0;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <p>Count: <strong>{{count}}</strong></p>
+                <button @click="increment()">+1</button>
+                <button @click="reset()">Reset</button>
+            </div>
+            """;
+    }
+}
+```
+
+## Methods to override
+
+`HtmlComponent` exposes four lifecycle hooks and a template method:
+
+| Method | When it runs | Typical use |
+|---|---|---|
+| `template()` | Every render cycle | Return HTML string with `{{binding}}` interpolations |
+| `onInit()` | Once, before the first render | Load data from a service; set initial field values |
+| `onMount()` | After the component tree is attached to a live session | Start background timers, subscribe to external events |
+| `onUnmount()` | When the session ends or the component is navigated away from | Cancel timers, release resources |
+
+<Note>
+  `template()` must either be overridden or a file `ClassName.html` must exist next to the `.java` file. If neither is present JReactive throws `IllegalStateException` at render time.
+</Note>
+
+## Lifecycle order
+
+<Steps>
+  <Step title="onInit()">
+    Called once per component instance the first time `render()` is invoked. Runs before the first HTML snapshot is produced. Use it to fetch data, inject defaults, or configure state from path parameters.
+  </Step>
+  <Step title="render() — first time">
+    JReactive evaluates `template()`, resolves all bindings, and produces the initial HTML snapshot. Child components are instantiated here.
+  </Step>
+  <Step title="onMount()">
+    Called after the component (and all its children) transition from `UNMOUNTED` to `MOUNTED`. Safe to start long-running tasks like timers because the WebSocket session is live.
+  </Step>
+  <Step title="State mutations and updates">
+    `@Call` methods execute on the server. Mutated `@State` fields are diffed against their snapshot and pushed to the client over WebSocket.
+  </Step>
+  <Step title="onUnmount()">
+    Called when the component transitions back to `UNMOUNTED` — on session expiry, explicit eviction, or SPA navigation away from the page. Cancel timers and release all resources here.
+  </Step>
+</Steps>
+
+### Real example: `ClockLeaf`
+
+`ClockLeaf` from the demo app demonstrates the full lifecycle. It starts a `java.util.Timer` in `onMount()` and cancels it in `onUnmount()`, preventing timer leaks when the user navigates away:
+
+```java
+public class ClockLeaf extends HtmlComponent {
+
+    @Bind public Type<String> greet = $("Hello");
+    @Bind public Type<String> clock = $("--:--:--");
+
+    transient Timer timer;
+
+    @Override
+    public void onInit() {
+        // Set the server time immediately so the first render shows a real value.
+        clock.set(LocalTime.now().withNano(0).toString());
+    }
+
+    @Override
+    protected void onMount() {
+        timer = new Timer(true);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override public void run() {
+                clock.set(LocalTime.now().withNano(0).toString());
+            }
+        }, 1000, 1000);
+    }
+
+    @Override
+    protected void onUnmount() {
+        if (timer != null) {
+            timer.cancel();
+            timer = null;
+        }
+    }
+
+    @Override
+    public String template() {
+        return """
+               <div class="clock">
+                 <h1>{{greet}}, the time is {{clock}}!</h1>
+                 <input name="greet" placeholder="Type greeting">
+               </div>
+               """;
+    }
+}
+```
+
+## `@State` vs `@Bind`
+
+Both annotations expose fields to the template engine, but they serve different purposes:
+
+| Annotation | Direction | Auto-wrapped | When to use |
+|---|---|---|---|
+| `@State` | Server → Client (and back via `@Call` args) | Yes — `List` → `SmartList`, `Set` → `SmartSet`, `Map` → `SmartMap` | Mutable server state: counters, form values, lists of items |
+| `@Bind` | Bidirectional (client input updates server) | No | Input fields that should sync from client to server; `ReactiveVar<T>` or `Type<T>` fields |
+
+```java
+// @State: server owns the value; changes fire WebSocket deltas automatically
+@State
+public int count = 0;
+
+@State
+public List<String> items = new ArrayList<>();  // auto-wrapped as SmartList
+
+// @Bind: bidirectional input binding using Type<T>
+@Bind public Type<String> greet = $("Hello");
+
+// @Bind on a plain field — used to pass read-only data to the template
+@Bind
+public List<String> headers = List.of("Name", "Email", "Actions");
+```
+
+<Tip>
+  Use `@State` for everything your `@Call` methods mutate. Use `@Bind` for read-only computed values exposed to the template, or for `Type<T>` / `ReactiveVar<T>` fields that you want to mutate directly from Java without triggering `updateState()`.
+</Tip>
+
+## Child component composition
+
+You compose components by using the child's class name as an HTML tag inside the parent's template. JReactive instantiates the child, renders it, and includes its output inline.
+
+```java
+// Parent template in HomePage
+@Override
+protected String template() {
+    return """
+      <div class="page">
+        <HelloLeaf />
+        <ClockLeaf ref="reloj" :greet="hello.newFruit" />
+        <CounterLeaf />
+      </div>
+      """;
+}
+```
+
+- **Self-closing tags** like `<HelloLeaf />` work fine.
+- **`ref` attribute** assigns a stable local alias. You can then reference a child's state in another child's binding with `ref.fieldName` (e.g., `:greet="hello.newFruit"` passes `HelloLeaf`'s `newFruit` field to `ClockLeaf`'s `greet` binding).
+- **`:prop="binding"`** passes a binding expression to a child's `@Bind` field.
+
+## Slots
+
+Slots let a parent component inject HTML into a child's template, similar to web component slots.
+
+### Default slot
+
+Use `<slot />` in a child template to render whatever the parent passes between the component's opening and closing tags:
+
+```html
+<!-- Layout template (MainLayout) -->
+<main id="app">
+    <slot />
+</main>
+```
+
+JReactive calls `slot()` (or `_getSlotHtml("default")`) to retrieve the injected HTML at render time.
+
+### Named slots
+
+For multiple injection points, use named slots:
+
+```html
+<!-- Child template -->
+<div class="card">
+    <header><slot name="header" /></header>
+    <main><slot /></main>
+    <footer><slot name="footer" /></footer>
+</div>
+```
+
+From Java you call `slot("header")` and `slot("footer")` to access named slot content. The layout mechanism in `JrxHttpApi` injects the page HTML into the `"default"` slot via `layout._setSlots(Map.of("default", page.render()))`.
+
+## Component IDs
+
+JReactive assigns each component a stable identifier composed of its class name and a per-parent sequence counter — for example, `HomePage-HelloLeaf-0` for the first `HelloLeaf` inside `HomePage`. These IDs:
+
+- Namespace WebSocket binding keys so multiple instances of the same component class do not collide.
+- Route `@Call` invocations: a button click fires `POST /call/HelloLeaf-0.addFruit` (or just `addFruit` for the root page component).
+- Allow `findChild(ref, Type.class)` to locate a specific child instance from the parent.
+
+The sequence is reset each render cycle. JReactive reuses the same instance ("recycles" it) when the same component type appears at the same position across renders, so the ID — and the live WebSocket subscription — remains stable.

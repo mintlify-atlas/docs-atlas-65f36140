@@ -1,0 +1,284 @@
+---
+title: "Template language"
+description: "Full reference for JReactive's Mustache-based template syntax: interpolation, conditionals, loops, event bindings, child components, slots, SPA navigation, and client-side hooks."
+---
+
+JReactive templates are HTML strings with a Mustache-like syntax. They are parsed into an AST at compile time (when using `jreactive-apt`) or at first render, and evaluated against the component's binding map. The result is a reactive HTML snapshot that the browser keeps in sync via WebSocket deltas.
+
+You return the template from `template()` or place it in a `ClassName.html` file next to your Java class.
+
+## Syntax reference
+
+| Syntax | Purpose |
+|---|---|
+| `{{variable}}` | Interpolate a binding value |
+| `{{object.field}}` | Access a nested field on a POJO or map |
+| `{{items.size}}` | Call a zero-argument method on a binding value |
+| `{{#if condition}}...{{/if}}` | Conditional block |
+| `{{#if condition}}...{{else}}...{{/if}}` | Conditional with fallback |
+| `{{#if !condition}}...{{/if}}` | Negated condition |
+| `{{#each list as item}}...{{/each}}` | Loop over a list |
+| `<ChildName />` | Embed a child component (self-closing) |
+| `<ChildName :prop="binding" />` | Pass a binding to a child's `@Bind` field |
+| `@click="method(arg)"` | Wire a click event to an `@Call` method |
+| `@submit="method(form)"` | Wire a form submit event |
+| `@input="method(field)"` | Wire an input event (fires on every keystroke) |
+| `@change="method(field)"` | Wire a change event (fires on blur / selection change) |
+| `:disabled="expr"` | Boolean attribute binding |
+| `:checked="expr"` | Boolean attribute binding |
+| `<slot/>` | Default slot injection point |
+| `<slot name="header"/>` | Named slot injection point |
+| `data-router` | Mark a link for SPA navigation |
+| `data-optimistic="..."` | Optimistic UI DSL for instant UI feedback |
+| `client:mount="fn(this)"` | Run client JS when the element enters the DOM |
+| `client:unmount="fn(this)"` | Run client JS when the element leaves the DOM |
+| `client:update="fn(this)"` | Run client JS when the element's data changes |
+| `expose="alias"` | Alias for the loop variable in `{{#each}}` |
+| `ref="alias"` | Assign a local alias to a child component |
+
+## Interpolation
+
+```html
+<h2>User {{name}}</h2>
+<p>ID: {{userId}}</p>
+<p>Theme: {{store.ui.theme}}</p>
+<p>Item count: {{items.size}}</p>
+```
+
+Bindings resolve against the component's `@State` and `@Bind` fields. Dot-path notation traverses nested POJOs. Zero-argument Java methods can be called with dot notation (e.g., `.size`).
+
+## Conditionals
+
+```html
+{{#if showHello}}
+  <p>Hello, world!</p>
+{{/if}}
+
+{{#if isEditing}}
+  <span>Editing mode</span>
+{{else}}
+  <span>View mode</span>
+{{/if}}
+
+{{#if !showSecret}}
+  <div>Content is hidden.</div>
+{{/if}}
+```
+
+The condition resolves to a Java `Boolean` or any truthy value. Null and `false` evaluate as falsy.
+
+## Loops
+
+```html
+{{#each fruits as fruit}}
+  <li>{{fruit}}</li>
+{{/each}}
+
+{{#each items as it}}
+  <li>{{it}}</li>
+{{/each}}
+```
+
+The `as` clause names the loop variable. Inside the block, `{{fruit}}` (or whatever alias you chose) resolves to the current element. You can access fields on POJO elements with dot notation:
+
+```html
+{{#each markers as marker}}
+  <tr>
+    <td>{{marker.title}}</td>
+    <td>{{marker.lat}}</td>
+  </tr>
+{{/each}}
+```
+
+### `expose` for table rows
+
+The `expose` attribute on a component tag lets you name the loop variable for rows inside a `JTable` (or any component that renders children in a loop context):
+
+```html
+<JTable :columns="headers" :data="clients" expose="row">
+    <td>{{row.name}}</td>
+    <td>{{row.email}}</td>
+    <td>
+        <button @click="openEdit(row)">Edit</button>
+        <button @click="delete(row)">Delete</button>
+    </td>
+</JTable>
+```
+
+## Event bindings
+
+Prefix any HTML attribute with `@` to bind a DOM event to an `@Call` method:
+
+```html
+<!-- Click -->
+<button @click="increment()">+1</button>
+
+<!-- Click with argument -->
+<button @click="addFruit(newFruit)">Add</button>
+
+<!-- Submit a form DTO -->
+<button @click="register(form)">Sign up</button>
+
+<!-- Input (fires on every keystroke) -->
+<input name="form.name" @input="validar(form)">
+
+<!-- Change (fires on blur or select change) -->
+<select name="form.country" @change="refreshCountryLabel(form)"></select>
+```
+
+Arguments passed in the call expression are matched to `@Call` method parameters by name. For DTOs (POJOs with `@State` on the component), the runtime binds the named fields automatically.
+
+## Boolean attribute bindings
+
+Prefix an attribute with `:` to bind it to a boolean expression:
+
+```html
+<input type="checkbox" :checked="hasLiked">
+<button :disabled="items.size == 0">Clear</button>
+```
+
+## Child components
+
+```html
+<!-- Simple child -->
+<HelloLeaf />
+
+<!-- Child with a binding passed in -->
+<ClockLeaf ref="reloj" :greet="hello.newFruit" />
+
+<!-- UI library component -->
+<JButton label="Save" type="primary" onClick="save(form)" />
+
+<!-- Passing state to JSelect options -->
+<JSelect
+  :field="form.country"
+  label="Country"
+  :options="countries"
+  placeholder="Select a country"
+  required="true"
+/>
+```
+
+The `:prop="binding"` syntax binds a parent binding expression to a child's `@Bind` field.
+
+## Slots
+
+```html
+<!-- Default slot in a layout template -->
+<main id="app">
+    <slot />
+</main>
+
+<!-- Named slot -->
+<header><slot name="header" /></header>
+<main><slot /></main>
+```
+
+## SPA navigation
+
+Add `data-router` to any anchor tag to enable SPA navigation. JReactive intercepts the click, fetches the new page via AJAX, and morphs the DOM without a full reload:
+
+```html
+<a href="/" data-router>Home</a>
+<a href="/users/10" data-router>Profile</a>
+<a href="/signup" data-router>Sign up</a>
+```
+
+The `data-router` attribute is used throughout the demo app's navigation bar and the `MainLayout` template.
+
+## Optimistic UI
+
+The `data-optimistic` attribute lets you describe immediate UI mutations that take effect before the server responds. If the server call fails, the runtime rolls back to the pre-mutation state:
+
+```html
+<button @click="toggleLikeOptimistic()"
+        data-optimistic="
+            likes: hasLiked ? -1 : +1;
+            heartIcon: hasLiked ? '🤍' : '❤️';
+            heartColor: hasLiked ? '#ccc' : '#e25555';
+            hasLiked: toggle
+        ">
+    Like
+</button>
+```
+
+The DSL supports:
+- **Numeric delta**: `likes: hasLiked ? -1 : +1` (adds or subtracts from current value)
+- **String assignment**: `heartIcon: '❤️'`
+- **Boolean toggle**: `hasLiked: toggle`
+
+## Client-side lifecycle hooks
+
+The `client:mount`, `client:update`, and `client:unmount` attributes attach JavaScript callbacks to DOM lifecycle events. They are evaluated in the browser when the element is added to, updated in, or removed from the DOM:
+
+```html
+<!-- Run JS when element appears -->
+<div
+    client:mount="HookPage_mount(this)"
+    client:unmount="HookPage_unmount(this)">
+    Component with encapsulated JS.
+</div>
+
+<!-- Leaflet map: pass reactive data, call JS on update -->
+<div id="leafletMap"
+     jrx-ignore
+     data-markers="{{markers}}"
+     client:mount="window.LeafletDemo.init(this)"
+     client:update="window.LeafletDemo.update(this)"
+     client:unmount="window.LeafletDemo.destroy(this)">
+</div>
+```
+
+`jrx-ignore` tells the JReactive DOM morpher to skip reconciling the children of that element — useful for third-party libraries (like Leaflet) that manage their own DOM.
+
+## Full example
+
+The `SignupPage` demo combines conditionals, event bindings, and DTO forms:
+
+```java
+@Route(path = "/signup")
+@StatefulRam
+@Client
+public class SignupPage extends AppPage {
+
+    public static class SignupForm implements Serializable {
+        @NotBlank(message = "Name is required")
+        public String name;
+
+        @NotBlank @Email
+        public String email;
+
+        @NotBlank @Size(min = 8)
+        public String password;
+    }
+
+    @State
+    PageState state = new PageState();
+
+    @Call
+    public void register(@Valid SignupForm form) {
+        state.lastMessage = "User " + form.name + " registered";
+        updateState("state");
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <section>
+              <h1>Registration</h1>
+              <label>Name:
+                <input type="text" name="form.name" @input="validar(form)">
+              </label>
+              <label>Email:
+                <input type="email" name="form.email" @input="validar(form)">
+              </label>
+              <label>Password:
+                <input type="password" name="form.password" @input="validar(form)">
+              </label>
+              <button type="button" @click="register(form)">Register</button>
+              <p data-if="state.lastMessage">{{state.lastMessage}}</p>
+            </section>
+            """;
+    }
+}
+```

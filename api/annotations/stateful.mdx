@@ -1,0 +1,95 @@
+---
+title: "@Stateful"
+description: "Persists component state to Redis. Enables server restarts and horizontal scaling by storing the component tree in a distributed store."
+---
+
+`@Stateful` instructs the runtime to serialize and persist the component to Redis after each `@Call`. State survives server restarts and is shared across all pods in a cluster, making `@Stateful` the right choice for production deployments that require durability or horizontal scaling.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Requirements
+
+- Add the `jreactive-store-redis` dependency to your project.
+- A running Redis instance reachable from your application.
+- Configure the Redis connection (host, port) in your application properties.
+
+## Behavior
+
+1. **Serialization.** After each `@Call(sync = true)` (the default), the runtime serializes the component with either Jackson or FST, depending on the configured `StateSerializer`.
+2. **Redis key format.** Components are stored under the key: `jrx:page:{sessionId}:{path}`. A separate index key `jrx:idx:{sessionId}` tracks all paths for a session to enable fast session cleanup.
+3. **TTL.** Entries expire after **30 minutes** of inactivity. Accessing the entry resets the timer.
+4. **CAS optimistic locking.** `RedisStateStore.replace()` uses a Lua CAS script. If two concurrent requests attempt to modify the same component, the second write fails and the runtime invalidates the local cache, preventing stale state.
+5. **Hybrid store.** In production, the `HybridStateStore` (L1 = Caffeine, L2 = Redis) is used. Reads hit Caffeine first; on a miss, the entry is fetched from Redis and promoted to the local cache (read-repair). Writes to Redis can be synchronous (strong consistency) or asynchronous (high throughput), depending on configuration.
+
+<Warning>
+  `@Stateful` components must implement `java.io.Serializable` (which `HtmlComponent` already does). All `@State` fields and their object graphs must also be serializable.
+</Warning>
+
+## Choosing a persistence strategy
+
+| Annotation | Storage | Survives restart | Scales horizontally | Notes |
+|---|---|---|---|---|
+| `@StatefulRam` | Caffeine (RAM) | No | No | Default; fastest option |
+| `@Stateful` | Redis | Yes | Yes | Requires `jreactive-store-redis` |
+| `@Stateless` | Client token | N/A | Yes | Zero server memory; no WebSocket push |
+
+## Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.Stateful;
+import com.ciro.jreactive.router.Route;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/cart")
+@Stateful
+public class CartPage extends HtmlComponent {
+
+    @State
+    public List<String> items = new ArrayList<>();
+
+    @State
+    public double total = 0.0;
+
+    @Call
+    public void addItem(String name, double price) {
+        items.add(name);
+        total += price;
+    }
+
+    @Call
+    public void clearCart() {
+        items.clear();
+        total = 0.0;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h2>Cart ({{items.size}} items)</h2>
+                <ul>
+                    {{#each items as item}}
+                        <li>{{item}}</li>
+                    {{/each}}
+                </ul>
+                <p>Total: {{total}}</p>
+                <button @click="clearCart()">Clear</button>
+            </div>
+            """;
+    }
+}
+```
+
+## Related
+
+- [`@StatefulRam`](/api/annotations/statefulram) — in-memory Caffeine store (default)
+- [`@Stateless`](/api/annotations/stateless) — zero server memory; state travels in a signed client token
+- [`StateStore`](/api/state-store) — the interface and all built-in implementations

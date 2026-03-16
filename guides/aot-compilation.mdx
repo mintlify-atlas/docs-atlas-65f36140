@@ -1,0 +1,230 @@
+---
+title: "AOT compilation"
+description: "Use the jreactive-apt annotation processor to eliminate reflection, pre-compile templates, and validate component wiring at mvn compile time."
+---
+
+The `jreactive-apt` module ships `TemplateProcessor` — a Java annotation processor that runs during `mvn compile`. It validates your component templates against your Java source, generates zero-reflection accessor classes, pre-compiles client-side JS templates, and embeds scoped CSS. The result is a faster, safer runtime with compile-time error detection.
+
+## Setting up the annotation processor
+
+Configure `maven-compiler-plugin` to include `jreactive-apt` as an annotation processor path. The `--add-exports` flags give the processor access to the internal compiler tree APIs it uses for template extraction and CSS file location:
+
+```xml
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <configuration>
+        <source>21</source>
+        <target>21</target>
+        <annotationProcessorPaths>
+            <path>
+                <groupId>com.ciro</groupId>
+                <artifactId>jreactive-apt</artifactId>
+                <version>${project.version}</version>
+            </path>
+        </annotationProcessorPaths>
+        <fork>true</fork>
+        <compilerArgs>
+            <arg>--add-exports</arg>
+            <arg>jdk.compiler/com.sun.source.util=ALL-UNNAMED</arg>
+            <arg>--add-exports</arg>
+            <arg>jdk.compiler/com.sun.source.tree=ALL-UNNAMED</arg>
+            <arg>-parameters</arg>
+        </compilerArgs>
+    </configuration>
+</plugin>
+```
+
+Also add the `build-helper-maven-plugin` to include the generated sources directory in the compilation:
+
+```xml
+<plugin>
+    <groupId>org.codehaus.mojo</groupId>
+    <artifactId>build-helper-maven-plugin</artifactId>
+    <version>3.4.0</version>
+    <executions>
+        <execution>
+            <id>add-source</id>
+            <phase>generate-sources</phase>
+            <goals><goal>add-source</goal></goals>
+            <configuration>
+                <sources>
+                    <source>${project.build.directory}/generated-sources/annotations</source>
+                </sources>
+            </configuration>
+        </execution>
+    </executions>
+</plugin>
+```
+
+## What `TemplateProcessor` generates per component
+
+For every class that extends `HtmlComponent`, the processor generates three artifacts:
+
+<AccordionGroup>
+  <Accordion title="ClassName__Accessor.java — zero-reflection field access">
+The accessor is a concrete implementation of `ComponentAccessor<T>` with three switch-based methods:
+
+- `write(T t, String p, Object v)` — sets a field value by name with no reflection
+- `read(T t, String p)` — reads a field value by name with no reflection
+- `call(T t, String m, Object... args)` — invokes a `@Call` method by name with no reflection
+
+A `static` block registers the accessor with `AccessorRegistry` when the class is loaded:
+
+```java
+@Generated("JReactiveAPT")
+public class SignupPage__Accessor implements ComponentAccessor<SignupPage> {
+
+    static {
+        AccessorRegistry.register(SignupPage.class, new SignupPage__Accessor());
+    }
+
+    @Override
+    public void write(SignupPage t, String p, Object v) {
+        switch (p) {
+            case "state": t.state = (com.ciro.jreactive.SignupPage.PageState) v; return;
+            case "state.lastMessage": ((com.ciro.jreactive.SignupPage.PageState) t.state).lastMessage = (String) v; return;
+        }
+    }
+
+    @Override
+    public Object read(SignupPage t, String p) {
+        switch (p) {
+            case "state": return unwrap(t.state);
+            case "state.lastMessage": return ((com.ciro.jreactive.SignupPage.PageState) t.state).lastMessage;
+        }
+        return null;
+    }
+
+    @Override
+    public Object call(SignupPage t, String m, Object... args) {
+        switch (m) {
+            case "register":
+                t.register((com.ciro.jreactive.SignupPage.SignupForm) args[0]);
+                return null;
+        }
+        throw new IllegalArgumentException("Method not found: " + m);
+    }
+}
+```
+  </Accordion>
+
+  <Accordion title="getAst() — pre-compiled template AST">
+The processor parses the template string at compile time using the same `JrxParser` that the runtime uses. The resulting AST is serialized as static Java code inside `getAst()`. On first render the runtime calls `getAst()` instead of parsing the template string — skipping the parsing step entirely:
+
+```java
+@Override
+public List<JrxNode> getAst() {
+    return Arrays.asList(
+        new ElementNode("section", false) {{
+            children.add(
+                new ElementNode("h1", false) {{
+                    children.add(new TextNode("Registro con Bean Validation"));
+                }}
+            );
+            ...
+        }}
+    );
+}
+```
+  </Accordion>
+
+  <Accordion title="getScopedCss() — pre-scoped CSS string">
+The processor reads the component's `.css` file (if present), scopes all selectors with `CssScoper`, minifies the result, and embeds it as a string literal. See the [Scoped CSS guide](/guides/scoped-css) for details.
+
+```java
+@Override
+public String getScopedCss() {
+    return ".jrx-sc-ColorBox .demo-box{width:150px;height:150px;...}";
+}
+```
+  </Accordion>
+
+  <Accordion title="ClassName.jrx.js — client-side pre-compiled template">
+For components annotated with `@Client`, the processor also emits a JavaScript file to `static/js/jrx/ClassName.jrx.js`. This file registers a compiled template renderer in `window.JRX_RENDERERS`:
+
+```javascript
+if (!window.JRX_RENDERERS) window.JRX_RENDERERS = {};
+window.JRX_RENDERERS['com_ciro_jreactive_SignupPage'] = {
+  compiled: true,
+  getTemplate: function() {
+    return `<section>...</section>`;
+  }
+};
+```
+
+The JS runtime checks `window.JRX_RENDERERS` before falling back to server-rendered HTML, enabling fully client-side re-renders without a round-trip.
+  </Accordion>
+</AccordionGroup>
+
+## `AccessorRegistry` and lazy loading
+
+`AccessorRegistry` is a thread-safe `ConcurrentHashMap` from component class to `ComponentAccessor`. When the runtime needs to access fields on a component it calls `AccessorRegistry.get(clazz)`:
+
+1. If the accessor is already in the cache (registered by its `static` block), it is returned immediately.
+2. If not, the registry attempts to load `ClassName + "__Accessor"` with `Class.forName()`. Loading the class triggers its `static` block, which calls `AccessorRegistry.register()`.
+3. If `Class.forName()` throws `ClassNotFoundException` (the component was not processed by the APT), a `NO_OP` sentinel is stored to prevent repeated failed lookups.
+4. If the registry returns `null` (no accessor found), the runtime falls back to reflection — the same behavior as without the APT.
+
+```java
+public static <T extends HtmlComponent> ComponentAccessor<T> get(Class<T> clazz) {
+    ComponentAccessor<?> acc = cache.get(clazz);
+    if (acc == NO_OP) return null;
+    if (acc != null) return (ComponentAccessor<T>) acc;
+
+    try {
+        Class.forName(clazz.getName() + "__Accessor");
+        acc = cache.get(clazz);
+        if (acc != null) return (ComponentAccessor<T>) acc;
+    } catch (ClassNotFoundException e) {
+        cache.put(clazz, NO_OP);
+    }
+    return null; // reflection fallback
+}
+```
+
+## Compile-time template validation
+
+`TemplateProcessor` validates the connection between templates and Java code during compilation:
+
+<Steps>
+  <Step title="HTML syntax check">
+    The template string is parsed by `JrxParser`. A malformed template causes an `ERROR` diagnostic that fails the build immediately.
+  </Step>
+  <Step title="Variable existence check">
+    Every `{{variable}}` reference in the template is matched against the component's `@State` and `@Bind` fields. An unrecognized root variable name causes a compiler `ERROR`:
+
+    ```
+    ❌ [JReactive] La variable 'usr' no existe en SignupPage.java.
+       Declárala con @State o expose.
+    ```
+  </Step>
+  <Step title="Method existence check">
+    Every `@event="methodName()"` reference is matched against `@Call`-annotated methods. A missing `@Call` annotation causes a compiler `ERROR`:
+
+    ```
+    ❌ [JReactive] El método 'submitt' no existe en SignupPage.java. Falta @Call.
+    ```
+  </Step>
+  <Step title="Ref existence check">
+    References using dot notation (e.g. `@click="myRef.method()"`) are checked against `ref="myRef"` attributes in the same template.
+  </Step>
+</Steps>
+
+## Reflection fallback (JIT mode)
+
+If a component's accessor class is not on the classpath — for example, during development with hot-reload before a full recompile — the runtime falls back to Java reflection to read and write fields and invoke methods. Performance is lower, but the application functions correctly.
+
+<Tip>
+Run `mvn compile` or `mvn package` to generate all accessors before running in production. The fallback to reflection is logged: look for `⚡ [AOT] Accessor cargado y activado` messages in the startup log to confirm AOT accessors are active.
+</Tip>
+
+## Performance benefits
+
+| Aspect | Without APT (reflection) | With APT (AOT) |
+|---|---|---|
+| Field read/write | `Field.get()` / `Field.set()` | Direct field access via switch |
+| Method invocation | `Method.invoke()` | Direct `t.methodName(args)` call |
+| Template parsing | On every first render | Pre-compiled AST in `getAst()` |
+| CSS scoping | Not applicable | Pre-scoped and minified at compile time |
+| Client rendering | Server round-trip | Pre-compiled JS template in `window.JRX_RENDERERS` |

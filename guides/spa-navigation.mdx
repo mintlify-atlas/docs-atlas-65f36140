@@ -1,0 +1,192 @@
+---
+title: "SPA navigation"
+description: "How JReactive implements client-side routing with data-router links, History.pushState, and server-side partial rendering."
+---
+
+JReactive applications navigate between pages without full browser reloads. When a user clicks a link annotated with `data-router`, the JS runtime fetches the new page's HTML fragment from the server, morphs the current DOM, and updates the browser URL using `History.pushState`. The WebSocket connection is re-established for the new route.
+
+## How client-side routing works
+
+<Steps>
+  <Step title="User clicks a data-router link">
+    The JS runtime intercepts the click on an anchor element that carries the `data-router` attribute. The default browser navigation is prevented.
+  </Step>
+  <Step title="Partial HTML request">
+    The runtime sends a `GET` request to the link's `href` with the `X-Partial: 1` header. The server detects this header and renders only the page component's HTML fragment, without the surrounding layout or `<html>`/`<head>` tags.
+  </Step>
+  <Step title="DOM morphing">
+    The response HTML is morphed into the `#app` container using [Idiomorph](https://github.com/bigskysoftware/idiomorph), preserving existing DOM elements where possible and applying minimal mutations.
+  </Step>
+  <Step title="URL and history update">
+    `History.pushState()` updates the browser URL to the new path without a page reload. The browser's Back and Forward buttons work as expected.
+  </Step>
+  <Step title="WebSocket reconnect">
+    The existing WebSocket connection is closed with close code `1000` and reason `route-change`. The runtime opens a new WebSocket connection with the `?path=` parameter set to the new route.
+  </Step>
+</Steps>
+
+## The `data-router` attribute
+
+Add `data-router` to any `<a>` element to make it a SPA link:
+
+```html
+<a href="/" data-router>Inicio</a>
+<a href="/users/10" data-router>Perfil</a>
+<a href="/store-test" data-router>Store</a>
+```
+
+Links without `data-router` trigger normal browser navigation.
+
+## The `Link` component
+
+`jreactive-ui` ships a `Link` component that renders an anchor with `data-router` pre-applied:
+
+```html
+<!-- In a template -->
+<Link href="/signup" label="Registrarme" />
+```
+
+## Server-side partial rendering
+
+On the server side, `PageEndpoint` (standalone) and `JrxHttpApi` (Spring) detect the `X-Partial: 1` header and render without the layout wrapper:
+
+<CodeGroup>
+
+```java standalone/PageEndpoint.java
+@Override
+public void handleRequest(HttpServerExchange exchange) throws Exception {
+    String partial = exchange.getRequestHeaders().getFirst("X-Partial");
+    boolean isPartial = "1".equals(partial);
+
+    HtmlComponent component = registry.resolve(requestPath).component();
+    String bodyHtml = component.render();
+
+    if (isPartial) {
+        exchange.getResponseSender().send(bodyHtml);
+        return;
+    }
+
+    // Full page for first load
+    String full = """
+        <!DOCTYPE html><html><head>...
+        </head><body><div id="app">%s</div></body></html>
+    """.formatted(bodyHtml);
+    exchange.getResponseSender().send(full);
+}
+```
+
+</CodeGroup>
+
+## Layouts and the `@Layout` annotation
+
+The `@Layout` annotation on a page class specifies which `HtmlComponent` wraps the page content on full (non-partial) loads. The layout component's template must contain a `<slot />` element where the page content is injected:
+
+```java
+// Define the layout
+public class MainLayout extends HtmlComponent {
+
+    @Override
+    protected String template() {
+        return """
+            <!DOCTYPE html>
+            <html lang="es">
+            <head>
+                <meta charset="UTF-8">
+                <title>JReactive App</title>
+            </head>
+            <body>
+                <nav>
+                    <ul>
+                        <li><a href="/" data-router>Inicio</a></li>
+                        <li><a href="/users/10" data-router>Perfil</a></li>
+                        <li><a href="/store-test" data-router>Store</a></li>
+                    </ul>
+                </nav>
+
+                <main id="app">
+                    <slot />
+                </main>
+
+                <script src="/js/idiomorph.min.js"></script>
+                <script src="/js/sockjs.min.js"></script>
+                <script src="/js/jreactive-runtime.js"></script>
+            </body>
+            </html>
+        """;
+    }
+}
+```
+
+```java
+// Apply the layout to all pages via a base class
+@Layout(MainLayout.class)
+public abstract class AppPage extends HtmlComponent {}
+
+// Individual pages extend AppPage (inheriting @Layout)
+@Route(path = "/")
+public class HomePage extends AppPage {
+    ...
+}
+
+@Route(path = "/signup")
+public class SignupPage extends AppPage {
+    ...
+}
+```
+
+The `@Layout` annotation is `@Inherited`, so a single `@Layout` on a base class applies to all subclasses.
+
+## Back and forward navigation
+
+Because `History.pushState()` is used for every SPA navigation, the browser's history stack is maintained correctly. When the user presses Back or Forward:
+
+1. The browser fires a `popstate` event.
+2. The JS runtime intercepts this event and performs a partial fetch for the path in `event.state`.
+3. The `#app` container is morphed with the response and a new WebSocket connection is opened for the route.
+
+## Transition states and loading indicators
+
+During a SPA navigation the JS runtime adds a `jrx-navigating` attribute to the `#app` element. You can use this in CSS to show a loading indicator:
+
+```css
+#app[jrx-navigating] {
+    opacity: 0.6;
+    pointer-events: none;
+    transition: opacity 0.15s;
+}
+
+/* Or show a custom spinner */
+#app[jrx-navigating]::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+    background: #4F46E5;
+    animation: loading-bar 1s infinite;
+}
+```
+
+The `jrx-navigating` attribute is removed as soon as the DOM morph is complete.
+
+## Complete navigation setup checklist
+
+<AccordionGroup>
+  <Accordion title="Layout component contains id=app">
+    The `<main id="app">` (or `<div id="app">`) element must be present in the layout template. The JS runtime uses this element as the morph target for partial updates. If it is missing, SPA navigation degrades to a full page reload.
+  </Accordion>
+  <Accordion title="JS runtime scripts are loaded">
+    The layout template must load `idiomorph.min.js` and `jreactive-runtime.js` (plus `sockjs.min.js` for the Spring Boot integration). These must appear **before** the closing `</body>` tag:
+
+    ```html
+    <script src="/js/idiomorph.min.js"></script>
+    <script src="/js/sockjs.min.js"></script>
+    <script src="/js/jreactive-runtime.js"></script>
+    ```
+  </Accordion>
+  <Accordion title="SPA links carry data-router">
+    Navigation links that should use client-side routing need the `data-router` attribute. Links without it cause a full browser navigation.
+  </Accordion>
+  <Accordion title="Root route is registered">
+    `RouteRegistry` requires at least one `@Route(path = "/")` component. If it is absent, the Spring context fails to start with an `IllegalStateException`.
+  </Accordion>
+</AccordionGroup>

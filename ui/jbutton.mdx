@@ -1,0 +1,128 @@
+---
+title: "JButton"
+description: "A reactive button component with label, variant, loading state, and click callback."
+---
+
+`JButton` renders a `<button>` element styled with JReactive's built-in CSS classes. It supports a loading spinner state, a disabled state, and a server-side click callback wired through the `@click` event binding.
+
+## Properties
+
+<ParamField path="label" type="String" default="Botón">
+  The text displayed inside the button. Replaced by a spinner when `loading` is `true`.
+</ParamField>
+
+<ParamField path="type" type="String" default="primary">
+  The visual variant applied as a CSS class (`jr-btn-{type}`). Common values: `primary`, `secondary`, `danger`.
+</ParamField>
+
+<ParamField path="loading" type="boolean" default="false">
+  When `true`, hides the label and shows a spinning indicator (`<span class="jr-spinner">`). Use this to signal an in-progress server call.
+</ParamField>
+
+<ParamField path="disabled" type="boolean" default="false">
+  When `true`, the button is visually and functionally disabled.
+</ParamField>
+
+<ParamField path="onClick" type="String" default="">
+  The name of the `@Call` method to invoke when the button is clicked. Pass arguments using standard call syntax, e.g. `"save(form)"`.
+</ParamField>
+
+## Usage example
+
+Place `<JButton>` inside any component template and bind its properties:
+
+```html template
+<!-- Static button -->
+<JButton label="Create account" type="primary" onClick="register()" />
+
+<!-- Reactive bindings: disable and show spinner while saving -->
+<JButton
+    label="Save changes"
+    type="primary"
+    :loading="isSaving"
+    :disabled="isSaving"
+    onClick="save()"
+/>
+
+<!-- Danger variant -->
+<JButton label="Delete" type="danger" onClick="delete(row)" />
+```
+
+## Java setup
+
+Declare a `@State` boolean to track the in-progress state, then toggle it inside your `@Call` method:
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/settings")
+public class SettingsPage extends AppPage {
+
+    @State public boolean isSaving = false;
+
+    @Call
+    public void save() {
+        this.isSaving = true;
+        // perform server-side work ...
+        this.isSaving = false;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <JButton
+                    label="Save settings"
+                    type="primary"
+                    :loading="isSaving"
+                    :disabled="isSaving"
+                    onClick="save()"
+                />
+            </div>
+        """;
+    }
+}
+```
+
+## How onClick maps to @Call
+
+The `onClick` value is the exact expression the browser sends to the server when the button is clicked. JReactive routes it to the matching `@Call`-annotated method:
+
+```html template
+<!-- onClick="openCreate()" → invokes openCreate() on the server -->
+<JButton label="New client" type="primary" onClick="openCreate()" />
+```
+
+```java
+@Call
+public void openCreate() {
+    this.isModalOpen = true;
+    this.modalTitle = "Create client";
+}
+```
+
+<Tip>
+  Pass row objects or other state values as arguments: `onClick="delete(row)"`. JReactive deserializes the argument from the current component state automatically.
+</Tip>
+
+## Real-world example
+
+From `ClientsPage` in the demo application:
+
+```html template
+<JButton label="Nuevo Cliente" type="primary" onClick="openCreate()" />
+```
+
+```java
+@Call
+public void openCreate() {
+    this.form = new Client_();
+    this.form.setStatus("Activo");
+    this.isEditing = false;
+    this.modalTitle = "Crear Cliente";
+    this.isModalOpen = true;
+}
+```

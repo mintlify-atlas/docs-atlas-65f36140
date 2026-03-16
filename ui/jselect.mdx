@@ -1,0 +1,185 @@
+---
+title: "JSelect"
+description: "A labeled dropdown component with typed options, static helpers, and a change callback."
+---
+
+`JSelect` renders a `<select>` element inside a `jrx-field` wrapper. Options are provided as a `List<JSelect.Option>`. Three static helpers — `from(String...)`, `from(Map)`, and `fromEnum(Class)` — make option construction concise. The `name` attribute on the select is set from the `field` property, so form submission works the same way as with `JInput`.
+
+## Properties
+
+<ParamField path="field" type="String" default="">
+  The `name` attribute of the underlying `<select>`. Use dot-notation for nested fields, e.g. `"form.status"`.
+</ParamField>
+
+<ParamField path="label" type="String" default="">
+  The visible label text rendered above the select.
+</ParamField>
+
+<ParamField path="options" type="List&lt;JSelect.Option&gt;" default="[]">
+  The list of options to render. Each option has `value`, `label`, and `disabled` fields. Use the static helpers to build this list.
+</ParamField>
+
+<ParamField path="placeholder" type="String" default="">
+  When set, renders a disabled `<option value="">` as the first item, prompting the user to select a value.
+</ParamField>
+
+<ParamField path="required" type="boolean" default="false">
+  When `true`, appends a required asterisk to the label and sets the `:required` binding on the select element.
+</ParamField>
+
+<ParamField path="disabled" type="boolean" default="false">
+  When `true`, disables the select element.
+</ParamField>
+
+<ParamField path="helpText" type="String" default="">
+  Secondary text rendered below the select in a `<small>` element.
+</ParamField>
+
+<ParamField path="onChange" type="String" default="">
+  The `@Call` expression invoked when the selected value changes.
+</ParamField>
+
+## JSelect.Option class
+
+Each option in the list is an instance of the inner `JSelect.Option` class:
+
+```java
+public static class Option implements Serializable {
+    public String value;
+    public String label;
+    public boolean disabled;
+
+    public Option(String value, String label) { ... }
+    public Option(String value, String label, boolean disabled) { ... }
+}
+```
+
+## Static helpers
+
+### JSelect.from(String...)
+
+Creates one option per string where `value` and `label` are both the string itself:
+
+```java
+this.statusOptions = JSelect.from("Active", "Inactive", "Pending");
+```
+
+### JSelect.from(Map&lt;String, String&gt;)
+
+Creates options from a map where each key becomes the `value` and each map value becomes the `label`:
+
+```java
+this.countryOptions = JSelect.from(Map.of(
+    "US", "United States",
+    "MX", "Mexico",
+    "CA", "Canada"
+));
+```
+
+### JSelect.fromEnum(Class&lt;T&gt;)
+
+Creates one option per enum constant. Both `value` and `label` are set to `name()` of the constant:
+
+```java
+public enum Role { ADMIN, EDITOR, VIEWER }
+
+this.roleOptions = JSelect.fromEnum(Role.class);
+// Produces: [{value:"ADMIN",label:"ADMIN"}, {value:"EDITOR",...}, ...]
+```
+
+## Usage example
+
+```html template
+<!-- String-based options -->
+<JSelect
+    label="Status"
+    field="form.status"
+    :options="statusOptions"
+    placeholder="Select a status"
+    required="true"
+/>
+
+<!-- Enum-based options with onChange callback -->
+<JSelect
+    label="Role"
+    field="form.role"
+    :options="roleOptions"
+    onChange="onRoleChange()"
+/>
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.JSelect;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+import java.util.List;
+
+@Route(path = "/new-user")
+public class NewUserPage extends AppPage {
+
+    public enum Role { ADMIN, EDITOR, VIEWER }
+
+    @State public List<JSelect.Option> roleOptions;
+    @State public List<JSelect.Option> statusOptions;
+
+    @Override
+    public void onInit() {
+        this.roleOptions = JSelect.fromEnum(Role.class);
+        this.statusOptions = JSelect.from("Active", "Inactive");
+    }
+
+    @Call
+    public void save(UserForm form) {
+        // form.role and form.status are populated from the selects
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <JForm onSubmit="save(form)">
+                <JSelect
+                    label="Role"
+                    field="form.role"
+                    :options="roleOptions"
+                    placeholder="Choose a role"
+                    required="true"
+                />
+                <JSelect
+                    label="Status"
+                    field="form.status"
+                    :options="statusOptions"
+                    required="true"
+                />
+            </JForm>
+        """;
+    }
+}
+```
+
+## Real-world example
+
+From `ClientsPage` — populating status options with `JSelect.from()` and using them in a modal form:
+
+```java
+@State public List<JSelect.Option> statusOptions = new ArrayList<>();
+
+@Override
+public void onInit() {
+    this.statusOptions = JSelect.from("Activo", "Inactivo");
+    this.form.setStatus("Activo");
+}
+```
+
+```html template
+<JSelect
+    label="Estado"
+    :field="form.status"
+    :options="statusOptions"
+    required="true"
+    placeholder="Selecciona una opcion"
+/>
+```

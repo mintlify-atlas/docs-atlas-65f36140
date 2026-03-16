@@ -1,0 +1,123 @@
+---
+title: "@Bind"
+description: "Marks a field as a bindable property that a parent component can set before rendering. Used to pass data down the component tree."
+---
+
+`@Bind` marks a field as a bindable property. A parent component sets it using the `:prop="expression"` syntax in its template before the child component renders. Unlike `@State`, `@Bind` fields are written by the parent, not by the component itself.
+
+**Package:** `com.ciro.jreactive`
+
+**Target:** `FIELD`
+
+**Retention:** `RUNTIME`
+
+## Annotation elements
+
+<ParamField body="value" type="String" default='""'>
+  The key name exposed for binding. When empty (the default), the Java field name is used. Set a custom value if you want the template attribute name to differ from the field name.
+</ParamField>
+
+<ParamField body="readOnly" type="boolean" default="false">
+  When `true`, the runtime ignores any attempt from the client to push a new value back to this field. Use `readOnly = true` for computed or server-authoritative values that should not be overwritten by browser input.
+</ParamField>
+
+## Behavior
+
+1. **Parent template binds the value.** In the parent's template, use `:fieldName="expression"` on the child component tag to pass a value. The expression is evaluated in the context of the parent component.
+2. **Runtime injects before render.** Before calling the child's `template()` method, the runtime calls `ComponentAccessor.write()` to set the `@Bind` field to the evaluated value.
+3. **Exposed to the template.** The field is available inside the child's `template()` just like a `@State` field.
+4. **Read-only enforcement.** If `readOnly = true`, client-side changes to that field's binding are ignored by the server.
+
+<Note>
+  `@Bind` fields are typically used with `Type<T>` wrappers (see the `Type.$()` helper) so the parent can pass a reactive reference instead of a snapshot value.
+</Note>
+
+## Difference from `@State`
+
+| | `@Bind` | `@State` |
+|---|---|---|
+| Written by | Parent component | The component itself |
+| Typical use | Data passed down from parent to child | Component's own mutable state |
+| Delta push | Only when the parent re-evaluates | Automatically after every `@Call` |
+| Read-only support | Yes | No |
+
+## Examples
+
+### Passing a list from parent to child
+
+**Parent component:**
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+import java.util.List;
+
+@Route(path = "/dashboard")
+@StatefulRam
+public class DashboardPage extends HtmlComponent {
+
+    @State
+    public List<String> notifications = List.of("Welcome!", "New message");
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <NotificationList :items="notifications" />
+            </div>
+            """;
+    }
+}
+```
+
+**Child component:**
+
+```java
+import com.ciro.jreactive.Bind;
+import com.ciro.jreactive.HtmlComponent;
+import java.util.Collections;
+import java.util.List;
+
+public class NotificationList extends HtmlComponent {
+
+    @Bind
+    public List<String> items = Collections.emptyList();
+
+    @Override
+    protected String template() {
+        return """
+            <ul>
+                {{#each items as item}}
+                    <li>{{item}}</li>
+                {{/each}}
+            </ul>
+            """;
+    }
+}
+```
+
+### Read-only binding
+
+Use `readOnly = true` for values that should only ever flow from server to client:
+
+```java
+@Bind(readOnly = true)
+public String serverTimestamp = "";
+```
+
+### Custom binding key
+
+```java
+@Bind("options")
+public List<JSelect.Option> countryOptions = Collections.emptyList();
+```
+
+The parent template uses `:options="myList"` to bind to this field.
+
+## Related
+
+- [`@State`](/api/annotations/state) — the component's own reactive state
+- [`@UrlParam`](/api/annotations/param) — injects a query string parameter into a field
+- [HtmlComponent](/api/html-component) — base class for all components

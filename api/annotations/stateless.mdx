@@ -1,0 +1,134 @@
+---
+title: "@Stateless"
+description: "Zero server memory mode. Component state is HMAC-signed, LZ4-compressed, and embedded in the page HTML. It travels back to the server with every @Call request."
+---
+
+`@Stateless` eliminates all server-side memory usage for a component. Instead of storing the component in a server-side store, the runtime encodes the state into a compact signed token, embeds it in the page as `<meta name="jrx-state">`, and expects the client to return it with every `@Call` request body.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Behavior
+
+### State encoding
+
+After rendering, the runtime calls `JrxStateToken.encode(stateMap)` which:
+
+1. Serializes all `@State` field values to a JSON map.
+2. Appends an `_exp` expiry timestamp 2 hours in the future.
+3. Compresses the JSON with **LZ4** (5–10× faster than GZIP, with similar ratios).
+4. Base64url-encodes the compressed bytes.
+5. Appends an **HMAC-SHA256** signature derived from the `JRX_SECRET` environment variable.
+
+The resulting token has the format: `<base64lz4>.<hmac>`
+
+The secret defaults to a random UUID generated at startup. Set `JRX_SECRET` in the environment to use a stable, shared secret across pods.
+
+### Token expiry
+
+Tokens expire after **2 hours**. After expiry, `JrxStateToken.decode()` returns an empty map and logs a warning. The component is re-initialized from scratch on the next request.
+
+### State transport
+
+On every `@Call` request, the JS runtime includes the current token in the request body:
+
+```json
+{
+  "args": [...],
+  "stateToken": "<base64lz4.hmac>"
+}
+```
+
+The server:
+1. Verifies the HMAC signature. Throws `SecurityException` if the token was tampered.
+2. Decompresses and deserializes the JSON.
+3. Hydrates the component's `@State` fields from the decoded map.
+4. Executes the `@Call` method.
+5. Re-encodes the updated state into a new token and returns it as `newStateToken` in the response.
+
+### Delta updates
+
+`@Stateless` components still return a `batch` of changed bindings in the response. The JS runtime applies the delta to the DOM and stores the `newStateToken` for the next call.
+
+### WebSocket limitations
+
+`@Stateless` components **cannot** receive server-initiated WebSocket pushes. Because the server holds no subscription for the component, there is nothing to push from. Timer-based updates and event bus notifications do not work in stateless mode.
+
+<Warning>
+  Do not store sensitive data (passwords, tokens, PII) in `@State` fields on a `@Stateless` component. The state is signed but not encrypted — its contents are visible to anyone who decodes the Base64 payload.
+</Warning>
+
+## When to use `@Stateless`
+
+- Public-facing pages with very high traffic and no need for real-time push.
+- Serverless or ephemeral deployments where no shared store is available.
+- Forms and wizards where state fits comfortably in a few kilobytes.
+
+## Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.DomMode;
+import com.ciro.jreactive.annotations.Stateless;
+import com.ciro.jreactive.router.Route;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/server-owned")
+@DomMode(JrxDomMode.SERVER_OWNED)
+@Stateless
+public class PublicPage extends HtmlComponent {
+
+    @State
+    public int counter = 0;
+
+    @State
+    public boolean showDetail = false;
+
+    @State
+    public List<String> log = new ArrayList<>(List.of("Started"));
+
+    @Call
+    public void interact() {
+        counter++;
+        showDetail = !showDetail;
+        log.add("Event #" + counter);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <p>Counter: {{counter}}</p>
+                <button @click="interact()">Interact</button>
+            </div>
+            """;
+    }
+}
+```
+
+## `JrxStateToken` API
+
+`JrxStateToken` is the utility class that handles encoding and decoding:
+
+```java
+// Encode a state map into a signed, compressed token
+String token = JrxStateToken.encode(Map<String, Object> state);
+
+// Decode and verify a token; returns empty map if expired or invalid
+Map<String, Object> state = JrxStateToken.decode(String token);
+```
+
+The `JRX_SECRET` environment variable controls the signing key. If not set, a random key is generated at startup — sessions will not survive restarts in that case.
+
+## Related
+
+- [`@Stateful`](/api/annotations/stateful) — Redis-backed persistence
+- [`@StatefulRam`](/api/annotations/statefulram) — in-memory Caffeine store (default)
+- [`@DomMode`](/api/annotations/dommode) — `SERVER_OWNED` pairs well with `@Stateless` for HTML-on-the-wire patterns
+- [`@Call`](/api/annotations/call) — `@Call` methods on `@Stateless` components receive and return `newStateToken`

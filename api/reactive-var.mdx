@@ -1,0 +1,167 @@
+---
+title: "ReactiveVar"
+description: "Thread-safe observable value container. The primitive unit of reactivity in JReactive — every @State and @Bind field is backed by a ReactiveVar at runtime."
+---
+
+`ReactiveVar<T>` is a lightweight, thread-safe observable that holds a single value. When `set()` is called, every registered listener is notified synchronously. JReactive uses `ReactiveVar` internally to track `@State` and `@Bind` field changes and push them to the browser over WebSocket.
+
+**Package:** `com.ciro.jreactive`
+
+```java
+public final class ReactiveVar<T> implements java.io.Serializable
+```
+
+## Constructor
+
+### `ReactiveVar(T initial)`
+
+```java
+public ReactiveVar(T initial)
+```
+
+Creates a new `ReactiveVar` with the given initial value.
+
+<ParamField query="initial" type="T" required>
+  The initial value. May be `null`.
+</ParamField>
+
+```java
+ReactiveVar<String> greeting = new ReactiveVar<>("Hello");
+ReactiveVar<Integer> count   = new ReactiveVar<>(0);
+ReactiveVar<List<String>> items = new ReactiveVar<>(new ArrayList<>());
+```
+
+## Methods
+
+### `get()`
+
+```java
+public T get()
+```
+
+Returns the current value. This is a plain field read — no synchronization.
+
+<ResponseField name="return value" type="T">
+  The current stored value.
+</ResponseField>
+
+---
+
+### `set(T newValue)`
+
+```java
+public void set(T newValue)
+```
+
+Stores `newValue` and notifies all registered listeners, **unless** the active guard returns `false`. The active guard is set to `() -> component._state() == MOUNTED` for all component-owned `ReactiveVar` instances, so updates from background threads are silently dropped once a session ends.
+
+<ParamField query="newValue" type="T" required>
+  The new value to store. May be `null`.
+</ParamField>
+
+Listeners are called inline, on the thread that calls `set()`. JReactive uses virtual threads (Java 21) for `@Call` handlers, so listener callbacks will run on virtual threads in normal usage.
+
+<Warning>
+  `set()` is not synchronized. Concurrent calls to `set()` from multiple threads may interleave listener notifications. If you need strict ordering, coordinate access externally or use `Type<T>` with a single owning thread (the `@Call` handler).
+</Warning>
+
+---
+
+### `onChange(Consumer<T> listener)`
+
+```java
+public Runnable onChange(Consumer<T> listener)
+```
+
+Registers a listener that is called every time `set()` fires. Returns a `Runnable` that removes the listener when invoked.
+
+<ParamField query="listener" type="Consumer<T>" required>
+  The callback to invoke on each value change. Receives the new value.
+</ParamField>
+
+<ResponseField name="return value" type="Runnable">
+  An unsubscribe handle. Call `run()` on it to remove the listener.
+</ResponseField>
+
+Listeners are stored in a `CopyOnWriteArrayList`, making iteration thread-safe and registration/removal non-blocking for reads.
+
+```java
+ReactiveVar<String> name = new ReactiveVar<>("Alice");
+
+// Register
+Runnable unsubscribe = name.onChange(newName ->
+    System.out.println("Name changed to: " + newName));
+
+name.set("Bob");   // prints "Name changed to: Bob"
+
+// Unregister
+unsubscribe.run();
+name.set("Carol"); // no output
+```
+
+---
+
+### `clearListeners()`
+
+```java
+public void clearListeners()
+```
+
+Removes all registered listeners. Called automatically by the framework when a component unmounts (`cleanupBindings()`). You do not need to call this manually.
+
+## Integration with `@State` and `@Bind`
+
+You rarely create `ReactiveVar` instances directly in components. Instead, use `@State` for server-owned values or `@Bind` with `Type<T>` for two-way bound fields:
+
+<Tabs>
+  <Tab title="Using @State">
+    ```java
+    // The framework wraps 'count' in a ReactiveVar automatically
+    @State
+    public int count = 0;
+
+    @Call
+    public void increment() {
+        count++;
+        // _syncState() detects the change and fires the ReactiveVar
+    }
+    ```
+  </Tab>
+  <Tab title="Using @Bind + Type">
+    ```java
+    import static com.ciro.jreactive.Type.$;
+
+    // Type<T> wraps a ReactiveVar internally
+    @Bind
+    public Type<String> clock = $("--:--:--");
+
+    @Override
+    protected void onMount() {
+        // set() on Type<T> delegates directly to the ReactiveVar
+        clock.set(LocalTime.now().withNano(0).toString());
+    }
+    ```
+  </Tab>
+  <Tab title="Direct ReactiveVar">
+    ```java
+    // Uncommon — direct ReactiveVar field
+    @Bind
+    public ReactiveVar<Boolean> visible = new ReactiveVar<>(true);
+
+    @Call
+    public void toggle() {
+        visible.set(!visible.get());
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Thread safety
+
+| Operation | Thread safe? | Notes |
+|---|---|---|
+| `get()` | Yes (read is atomic for references) | Plain field read. |
+| `set()` | Partially | Stores value atomically but listener dispatch is not synchronized. |
+| `onChange()` / `clearListeners()` | Yes | `CopyOnWriteArrayList` operations are thread-safe. |
+
+For components that run `@Call` handlers on virtual threads (Java 21 loom), the JReactive internal event queue serializes state updates before WebSocket dispatch, so concurrent `set()` calls from different sessions do not interfere.

@@ -1,0 +1,302 @@
+---
+title: "Redis state store"
+description: "Scale JReactive horizontally across multiple pods using Redis for shared state and cross-pod WebSocket push."
+---
+
+The default Caffeine state store keeps component state in the JVM heap. This works well for single-node deployments but fails when you run multiple application instances behind a load balancer: a WebSocket connection on pod A cannot reach state stored in pod B's heap.
+
+The `jreactive-store-redis` module solves this with two complementary backends:
+
+- `RedisStateStore` — serializes component state to Redis with a CAS (compare-and-swap) write protocol
+- `RedisMessageBroker` — uses Redis Pub/Sub to fan out WebSocket push events to all pods
+
+## When to use Redis
+
+<CardGroup cols={2}>
+  <Card title="Use Redis" icon="check">
+    - Multiple pods behind a load balancer
+    - Blue/green or rolling deployments
+    - State must survive pod restarts
+    - Cross-tab server push (push from pod A to session on pod B)
+  </Card>
+  <Card title="Stick with Caffeine" icon="x">
+    - Single-node deployment
+    - Components annotated `@Stateless` (no state to persist)
+    - Latency-sensitive pages where a Redis RTT is unacceptable
+  </Card>
+</CardGroup>
+
+## Dependencies
+
+```xml
+<dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-store-redis</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</dependency>
+
+<!-- Jedis client (Redis Java driver) -->
+<dependency>
+    <groupId>redis.clients</groupId>
+    <artifactId>jedis</artifactId>
+</dependency>
+```
+
+## `RedisStoreConfig` auto-configuration
+
+`RedisStoreConfig` is a Spring `@Configuration` class that reads connection and store properties and creates the appropriate beans:
+
+```java
+@Configuration
+public class RedisStoreConfig {
+
+    @Value("${jreactive.redis.host:localhost}")
+    private String host;
+
+    @Value("${jreactive.redis.port:6379}")
+    private int port;
+
+    @Value("${jreactive.store.consistency:strong}")
+    private String consistencyMode;
+
+    @Bean
+    @ConditionalOnProperty(name = "jreactive.store.serialization",
+                           havingValue = "json", matchIfMissing = true)
+    public StateSerializer jsonSerializer(ObjectMapper mapper) {
+        return new JacksonStateSerializer(mapper);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "jreactive.store.serialization", havingValue = "fst")
+    public StateSerializer fstSerializer() {
+        return new FstStateSerializer();
+    }
+
+    @Bean
+    @Primary
+    @ConditionalOnProperty(name = "jreactive.store.type", havingValue = "redis")
+    public StateStore onlyRedis(RedisStateStore redisStore) {
+        return redisStore;
+    }
+
+    @Bean
+    @Primary
+    @ConditionalOnProperty(name = "jreactive.store.type", havingValue = "hybrid")
+    public StateStore hybridStore(RedisStateStore redisStore) {
+        boolean isStrong = "strong".equalsIgnoreCase(consistencyMode);
+        return new HybridStateStore(new CaffeineStateStore(), redisStore, isStrong);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "jreactive.store.type", havingValue = "hybrid")
+    public JrxMessageBroker redisMessageBroker() {
+        return new RedisMessageBroker(host, port);
+    }
+}
+```
+
+### Configuration properties
+
+```properties
+# Redis connection
+jreactive.redis.host=localhost
+jreactive.redis.port=6379
+
+# Store backend: 'redis' (Redis only) or 'hybrid' (Caffeine L1 + Redis L2)
+jreactive.store.type=hybrid
+
+# Serialization: 'json' (Jackson, default) or 'fst' (FST binary)
+jreactive.store.serialization=json
+
+# Write consistency for hybrid store: 'strong' or 'eventual'
+jreactive.store.consistency=strong
+```
+
+## `RedisStateStore`
+
+### Key pattern
+
+Components are stored in Redis hashes with the key `jrx:page:{sessionId}:{path}`:
+
+```
+jrx:page:abc123:/signup     → hash: { data: <serialized component>, v: 3 }
+jrx:page:abc123:/clients    → hash: { data: <serialized component>, v: 1 }
+jrx:idx:abc123              → set:  { "/signup", "/clients" }      (index for evictAll)
+```
+
+All keys expire after 30 minutes of inactivity (`TTL_SECONDS = 1800`).
+
+### Compare-and-swap (CAS) writes
+
+Concurrent writes from different threads (or pods) are coordinated using a Lua script that implements optimistic compare-and-swap. Each component carries a version counter (`v`). A write succeeds only if the caller's expected version matches the current version in Redis:
+
+```java
+private static final String CAS_SCRIPT = """
+    local key = KEYS[1]
+    local expectedVer = tonumber(ARGV[1])
+    local newData = ARGV[2]
+
+    if redis.call('exists', key) == 0 then
+        if expectedVer == 0 then
+            redis.call('hset', key, 'data', newData, 'v', 1)
+            redis.call('expire', key, 1800)
+            return 1
+        else
+            return 0
+        end
+    end
+
+    local currentVer = tonumber(redis.call('hget', key, 'v') or '0')
+    if currentVer == expectedVer then
+        redis.call('hset', key, 'data', newData, 'v', currentVer + 1)
+        redis.call('expire', key, 1800)
+        return 1
+    else
+        return 0
+    end
+    """;
+```
+
+The Lua script executes atomically in Redis, preventing lost updates.
+
+## `RedisMessageBroker`
+
+When a user's WebSocket connection lands on pod A but a background job on pod B updates their state, pod B needs to push the delta to the WebSocket on pod A. `RedisMessageBroker` achieves this using Redis Pub/Sub.
+
+### Channel pattern
+
+Each session maps to a channel: `jrx:upd:{sessionId}`. The broker subscribes to the pattern `jrx:upd:*` using `psubscribe`, which receives all session update events:
+
+```java
+public class RedisMessageBroker implements JrxMessageBroker {
+
+    private static final String CHANNEL_PREFIX = "jrx:upd:";
+    private static final String CHANNEL_PATTERN = "jrx:upd:*";
+    private final String serverId = UUID.randomUUID().toString();
+
+    @Override
+    public void publish(String sessionId, String message) {
+        String envelope = serverId + "|" + message;
+        jedis.publish(CHANNEL_PREFIX + sessionId, envelope);
+    }
+}
+```
+
+### Echo prevention
+
+Each pod generates a unique `serverId` at startup. Messages are published as `"serverId|payload"`. When a pod receives a Pub/Sub message, it checks whether `serverId` matches its own — if it does, the message originated locally and was already handled by the WebSocket, so it is ignored:
+
+```java
+@Override
+public void onPMessage(String pattern, String channel, String message) {
+    int sep = message.indexOf('|');
+    String senderId = message.substring(0, sep);
+    String payload = message.substring(sep + 1);
+    if (serverId.equals(senderId)) return; // echo from self
+    String sessionId = channel.substring(CHANNEL_PREFIX.length());
+    handler.accept(sessionId, payload);
+}
+```
+
+## `HybridStateStore`
+
+`HybridStateStore` combines a Caffeine L1 cache with Redis as L2 storage. It provides low-latency reads from RAM with persistence in Redis.
+
+### Read path
+
+1. Check L1 (Caffeine).
+2. If not found, check L2 (Redis).
+3. If found in L2, perform a read-repair: populate L1 and return.
+
+### Write path
+
+1. Always write to L1 immediately.
+2. If the component is `@StatefulRam`, skip L2 entirely — `@StatefulRam` components are ephemeral and should not persist across restarts.
+3. Otherwise, write to L2. In `strong` mode this is synchronous; in `eventual` mode it runs on a background `CompletableFuture`.
+
+```java
+@Override
+public void put(String sid, String path, HtmlComponent comp) {
+    l1.put(sid, path, comp);  // always immediate
+
+    if (comp.getClass().isAnnotationPresent(StatefulRam.class)) {
+        return; // ephemeral — skip Redis
+    }
+
+    if (strongConsistency) {
+        l2.put(sid, path, comp);
+    } else {
+        CompletableFuture.runAsync(() -> l2.put(sid, path, comp));
+    }
+}
+```
+
+## Serializers
+
+<Tabs>
+  <Tab title="Jackson (default)">
+`JacksonStateSerializer` serializes component state to JSON with type metadata. It activates default typing so Jackson knows which concrete class to deserialize:
+
+```java
+var ptv = BasicPolymorphicTypeValidator.builder()
+        .allowIfBaseType(Object.class)
+        .build();
+mapper.activateDefaultTyping(ptv,
+    ObjectMapper.DefaultTyping.NON_FINAL,
+    JsonTypeInfo.As.PROPERTY);
+```
+
+**Pros**: human-readable keys in Redis, debuggable, safe across Java class renames if field names are stable.
+
+**Cons**: larger payload than binary serialization, slower for large objects.
+  </Tab>
+  <Tab title="FST binary">
+`FstStateSerializer` uses [FST](https://github.com/RuedigerMoeller/fast-serialization) — a fast binary serialization library.
+
+```java
+private final FSTConfiguration conf = FSTConfiguration.createDefaultConfiguration();
+
+@Override
+public byte[] serialize(Object obj) {
+    return conf.asByteArray(obj);
+}
+```
+
+**Pros**: significantly smaller payload, faster serialization.
+
+**Cons**: not human-readable, fragile if class structure changes (requires full cache invalidation on deploy).
+  </Tab>
+</Tabs>
+
+Enable FST with:
+
+```properties
+jreactive.store.serialization=fst
+```
+
+## `@Stateful` annotation
+
+Annotate a component with `@Stateful` to opt in to Redis persistence explicitly:
+
+```java
+@Route(path = "/dashboard")
+@Stateful
+public class DashboardPage extends HtmlComponent {
+    @State public List<Metric> metrics = new ArrayList<>();
+    ...
+}
+```
+
+<Note>
+In the hybrid store, `@StatefulRam` components are stored only in Caffeine (L1) and are never written to Redis. Use `@StatefulRam` for ephemeral, tab-scoped state that must not persist across pod restarts or reconnects.
+</Note>
+
+## Connection configuration summary
+
+| Property | Default | Description |
+|---|---|---|
+| `jreactive.redis.host` | `localhost` | Redis hostname or IP |
+| `jreactive.redis.port` | `6379` | Redis port |
+| `jreactive.store.type` | _(none — uses Caffeine)_ | `redis` or `hybrid` |
+| `jreactive.store.serialization` | `json` | `json` or `fst` |
+| `jreactive.store.consistency` | `strong` | `strong` or `eventual` |

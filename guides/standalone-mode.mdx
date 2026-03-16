@@ -1,0 +1,272 @@
+---
+title: "Standalone mode"
+description: "Run JReactive on Undertow without any Spring dependency using jreactive-standalone."
+---
+
+Standalone mode lets you run JReactive on an embedded Undertow server with zero Spring Boot dependency. It is the right choice for microservices, command-line tools, and embedded deployments where Spring's classpath overhead is unwanted.
+
+## When to use standalone mode
+
+<CardGroup cols={2}>
+  <Card title="Use standalone" icon="check">
+    - Microservices that must start in under 1 second
+    - Docker images where Spring Boot classpath is too large
+    - Desktop or embedded JVM applications
+    - Projects that already use a different DI container
+  </Card>
+  <Card title="Use Spring Boot integration" icon="x">
+    - Applications that need `@Autowired` to inject Spring beans
+    - Projects using Spring Security, Spring Data, or other Spring starters
+    - Teams already invested in the Spring ecosystem
+  </Card>
+</CardGroup>
+
+## Dependencies
+
+Add these dependencies to your `pom.xml`. You do **not** need `jreactive-starter-spring`.
+
+```xml
+<dependencies>
+    <!-- Undertow-based server -->
+    <dependency>
+        <groupId>com.ciro</groupId>
+        <artifactId>jreactive-standalone</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </dependency>
+
+    <!-- JVM runtime (WebSocket protocol, HTTP API, page resolver) -->
+    <dependency>
+        <groupId>com.ciro</groupId>
+        <artifactId>jreactive-runtime-jvm</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </dependency>
+
+    <!-- Browser-side JS runtime (served as static files) -->
+    <dependency>
+        <groupId>com.ciro</groupId>
+        <artifactId>jreactive-runtime-js</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </dependency>
+
+    <!-- Built-in UI components (optional) -->
+    <dependency>
+        <groupId>com.ciro</groupId>
+        <artifactId>jreactive-ui</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </dependency>
+
+    <!-- AOT annotation processor (compile-time only) -->
+    <dependency>
+        <groupId>com.ciro</groupId>
+        <artifactId>jreactive-apt</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <scope>provided</scope>
+    </dependency>
+</dependencies>
+```
+
+## Main entry point
+
+Create a `main` class, install the AST engine, construct a `JReactiveServer`, register your routes, and call `start()`:
+
+```java
+public class Main {
+
+    public static void main(String[] args) {
+        AstComponentEngine.installAsDefault();
+
+        JReactiveServer server = new JReactiveServer(8080);
+        server.addRoute("/", CounterPage::new);
+        server.start();
+    }
+}
+```
+
+`JReactiveServer.start()` prints the listening URL and blocks the calling thread.
+
+## `JReactiveServer`
+
+`JReactiveServer` is the top-level wiring class. Its constructor creates all internal collaborators:
+
+- `SimpleRouteRegistry` — holds the manually registered route suppliers
+- `CaffeineStateStore` — in-memory component state store
+- `PageResolver` — resolves paths to component instances
+- `JrxHubManager` — manages per-session push hubs
+- `CallGuard` — runs Jakarta Bean Validation on `@Call` parameters
+- `StandaloneSessionManager` — cookie-based session tracking
+- `ScheduledExecutorService` — single-thread scheduler for DOM flush
+
+On `start()` it assembles an Undertow `PathHandler` with the following route table:
+
+| Prefix | Handler | Purpose |
+|---|---|---|
+| `/ws` | `WsEndpoint` | WebSocket connections |
+| `/call` | `CallEndpoint` | `@Call` method invocations over HTTP POST |
+| `/js` | `ResourceHandler` | JS runtime files from classpath `/static/js` |
+| `/static` | `ResourceHandler` | Other static assets from classpath `/static` |
+| `*` (fallback) | `PageEndpoint` | Initial HTML page renders |
+
+```java
+public class JReactiveServer {
+
+    public JReactiveServer(int port) {
+        this.registry = new SimpleRouteRegistry();
+        this.stateStore = new CaffeineStateStore();
+        this.pageResolver = new PageResolver(registry, stateStore);
+        this.mapper = ObjectMapperFactory.create();
+        this.hubManager = new JrxHubManager(pageResolver, mapper, null);
+        this.callGuard = new CallGuard(validator, mapper);
+        this.scheduler = Executors.newSingleThreadScheduledExecutor();
+        this.sessionManager = new StandaloneSessionManager();
+    }
+
+    public void addRoute(String path, Supplier<HtmlComponent> factory) {
+        registry.add(path, factory);
+    }
+}
+```
+
+## `SimpleRouteRegistry`
+
+`SimpleRouteRegistry` implements `RouteProvider` for the standalone mode. Unlike `RouteRegistry` in the Spring integration, it does not scan the classpath — you register routes manually using `add()`:
+
+```java
+SimpleRouteRegistry registry = new SimpleRouteRegistry();
+registry.add("/",              HomePage::new);
+registry.add("/users/{id}",    UserProfilePage::new);
+registry.add("/admin/reports", AdminReportsPage::new);
+```
+
+Path parameters (e.g. `{id}`) are compiled into a `PathPattern` and matched against incoming request paths. Matched parameter values are passed to the component via `RouteProvider.Result`.
+
+## HTTP endpoints
+
+### `PageEndpoint`
+
+`PageEndpoint` handles all non-WebSocket, non-`/call` requests. For a full browser request it returns a complete HTML page wrapping the component's initial render in `<div id="app">`. For partial requests (those carrying the `X-Partial: 1` header) it returns only the component's rendered HTML fragment — used by the SPA router when navigating between pages:
+
+```java
+@Override
+public void handleRequest(HttpServerExchange exchange) throws Exception {
+    String partial = exchange.getRequestHeaders().getFirst("X-Partial");
+    boolean isPartial = "1".equals(partial);
+
+    HtmlComponent component = registry.resolve(requestPath).component();
+    String bodyHtml = component.render();
+
+    if (isPartial) {
+        exchange.getResponseSender().send(bodyHtml);
+        return;
+    }
+
+    String full = """
+        <!DOCTYPE html><html><head>...
+        <script src="/js/jreactive-runtime.js"></script>
+        </head><body>
+        <div id="app">%s</div>
+        </body></html>
+    """.formatted(bodyHtml);
+    exchange.getResponseSender().send(full);
+}
+```
+
+### `CallEndpoint`
+
+`CallEndpoint` handles `POST /call/{methodName}` requests. It reads the request body as JSON, resolves the session and path, and delegates to `JrxHttpApi.call()`. The method name is extracted from the last path segment:
+
+```java
+// POST /call/increment
+// Body: { "path": "/", "args": [] }
+```
+
+The endpoint reads the session ID from the `JRXID` cookie and looks up the last known path from `StandaloneSessionManager` if no `path` is provided in the request body.
+
+## WebSocket: `WsEndpoint` and `UndertowJrxSession`
+
+`WsEndpoint` is the Undertow WebSocket callback. On `onConnect` it:
+
+1. Reads `path` and `since` from the WebSocket URL query parameters.
+2. Reads the `JRXID` session cookie from the handshake headers.
+3. Wraps the Undertow `WebSocketChannel` in an `UndertowJrxSession` — JReactive's transport-agnostic session interface.
+4. Resolves the component via `PageResolver.getPage()`.
+5. Creates a `JrxProtocolHandler` and calls `handler.onOpen(session, hub, since)`.
+
+```java
+public void onConnect(WebSocketHttpExchange exchange, WebSocketChannel channel) {
+    String path = getQueryParam(exchange, "path");
+    String sessionId = getCookieFromHandshake(exchange, StandaloneSessionManager.COOKIE_NAME);
+
+    JrxSession session = new UndertowJrxSession(channel, sessionId);
+    HtmlComponent page = pageResolver.getPage(sessionId, path);
+    JrxPushHub hub = hubManager.hub(sessionId, path);
+
+    JrxProtocolHandler handler = new JrxProtocolHandler(
+        page, mapper, scheduler,
+        true, 512, 16,
+        () -> pageResolver.persist(sessionId, path, page)
+    );
+    handler.onOpen(session, hub, since);
+}
+```
+
+`UndertowJrxSession` wraps a `WebSocketChannel` and implements the `JrxSession` SPI. It uses a `ReentrantLock` to guard concurrent `sendText()` calls:
+
+```java
+public class UndertowJrxSession implements JrxSession {
+
+    private final WebSocketChannel channel;
+    private final String id;
+    private final ReentrantLock lock = new ReentrantLock();
+
+    @Override
+    public void sendText(String text) {
+        lock.lock();
+        try {
+            if (channel.isOpen()) {
+                WebSockets.sendText(text, channel, null);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
+
+## `StandaloneSessionManager`
+
+`StandaloneSessionManager` provides cookie-based sessions without any servlet container. Sessions are stored in a Caffeine cache with a 2-hour idle expiry. The cookie name is `JRXID`:
+
+```java
+public class StandaloneSessionManager {
+
+    public static final String COOKIE_NAME = "JRXID";
+
+    private final Cache<String, SessionData> sessions = Caffeine.newBuilder()
+            .expireAfterAccess(2, TimeUnit.HOURS)
+            .build();
+
+    public SessionData ensureSession(HttpServerExchange exchange) {
+        String sid = CookieUtil.getCookie(exchange, COOKIE_NAME);
+        if (sid == null || sid.isBlank()) {
+            sid = newId();
+            CookieUtil.setCookie(exchange, COOKIE_NAME, sid);
+        }
+        return sessions.get(sid, SessionData::new);
+    }
+}
+```
+
+Session IDs are 18 random bytes encoded as URL-safe Base64, generated with `SecureRandom`.
+
+## Spring Boot vs standalone comparison
+
+| Feature | Spring Boot | Standalone |
+|---|---|---|
+| DI container | Spring (`@Autowired`) | Manual construction |
+| Route discovery | Classpath scan (`@Route`) | Manual `addRoute()` |
+| Session management | Servlet container (JSESSIONID) | Cookie (`JRXID`) |
+| WebSocket transport | SockJS + Spring WS | Undertow native WS |
+| Back-pressure config | `application.properties` | Constructor args |
+| Bean Validation | Auto-configured | Manual `Validation.buildDefaultValidatorFactory()` |
+| Redis store | `RedisStoreConfig` auto-config | Manual wiring |
+| Startup time | ~1–3 s (Spring context) | ~100–300 ms |

@@ -1,0 +1,150 @@
+---
+title: "Optimistic UI"
+description: "Apply instant local mutations before the server responds using data-optimistic, with automatic rollback on error."
+---
+
+Optimistic UI is a technique where the browser applies a predicted state mutation immediately on user interaction, before the server has confirmed the result. The user sees instant feedback. If the server later returns an error, the mutation is rolled back.
+
+JReactive implements optimistic UI through the `data-optimistic` attribute. No JavaScript is required on your part.
+
+## Why it matters
+
+Even on a fast connection, a `@Call` round-trip takes at minimum one network RTT. For interactions like toggling a like button, adding an item to a cart, or incrementing a counter, a 50–200 ms delay is perceptible. Optimistic UI eliminates that perceived latency entirely.
+
+The `OptimisticTestPage` demo makes this concrete by adding a deliberate 1-second server delay:
+
+- **Normal button**: the counter updates after 1 second.
+- **Optimistic button**: the counter updates instantly; the server confirms 1 second later in the background.
+- **Rollback button**: the counter updates instantly, then rolls back after the server throws an exception.
+
+## The `data-optimistic` DSL
+
+Add `data-optimistic` to any element that carries a `@click` (or other event) handler. The value is a semicolon-separated list of mutations:
+
+```
+data-optimistic="field: expression; field2: expression2"
+```
+
+### Expressions
+
+| Pattern | Meaning | Example |
+|---|---|---|
+| `field: +N` | Add N to current value | `likes: +1` |
+| `field: -N` | Subtract N from current value | `likes: -1` |
+| `field: +N.NN` | Add decimal | `total: +150.50` |
+| `field: condition ? val1 : val2` | Conditional (ternary) | `likes: hasLiked ? -1 : +1` |
+| `field: toggle` | Toggle a boolean | `hasLiked: toggle` |
+| `field: 'string'` | Set a literal string | `heartIcon: '❤️'` |
+
+### Full example from `OptimisticTestPage`
+
+```html
+<button @click="toggleLikeOptimistic()"
+        data-optimistic="
+            likes: hasLiked ? -1 : +1;
+            heartIcon: hasLiked ? '🤍' : '❤️';
+            heartColor: hasLiked ? '#ccc' : '#e25555';
+            hasLiked: toggle
+        "
+        style="padding: 15px; background: #007bff; color: white;">
+    ⚡ Optimista: Reacción en 0ms
+</button>
+```
+
+The corresponding server-side method performs the same mutation after a 1-second delay:
+
+```java
+@Route(path = "/optimistic-test")
+public class OptimisticTestPage extends AppPage {
+
+    @State public int likes = 145;
+    @State public boolean hasLiked = false;
+    @State public String heartIcon = "🤍";
+    @State public String heartColor = "#ccc";
+
+    @Call
+    public void toggleLikeOptimistic() {
+        simularLatencia(1000);
+        procesarLike();
+    }
+
+    private void procesarLike() {
+        if (hasLiked) {
+            likes--;
+            hasLiked = false;
+            heartIcon = "🤍";
+            heartColor = "#ccc";
+        } else {
+            likes++;
+            hasLiked = true;
+            heartIcon = "❤️";
+            heartColor = "#e25555";
+        }
+    }
+
+    private void simularLatencia(int ms) {
+        try { Thread.sleep(ms); } catch (Exception e) {}
+    }
+}
+```
+
+## How the JS runtime applies mutations
+
+<Steps>
+  <Step title="User clicks">
+    The JS runtime intercepts the click event. Before sending the HTTP request to `/call/toggleLikeOptimistic`, it reads the `data-optimistic` value and snapshots the current DOM state for rollback.
+  </Step>
+  <Step title="Pre-apply mutation">
+    The runtime evaluates each expression against the current local state and updates the corresponding DOM elements immediately — before any network request completes.
+  </Step>
+  <Step title="Server request in background">
+    The HTTP POST to `/call/toggleLikeOptimistic` is sent. The user already sees the updated UI.
+  </Step>
+  <Step title="Server confirms or errors">
+    If the server returns `ok: true`, the optimistic state is confirmed. If the server returns an error (any exception, including a validation failure), the runtime rolls back the DOM to the pre-click snapshot and applies the server-side state delta (if any).
+  </Step>
+</Steps>
+
+## Automatic rollback on server error
+
+To demonstrate rollback, `OptimisticTestPage` has a `toggleLikeError()` method that always throws:
+
+```java
+@Call
+public void toggleLikeError() {
+    simularLatencia(1000);
+    throw new RuntimeException("Error 500: Fallo en la Base de Datos al guardar el Like.");
+}
+```
+
+With `data-optimistic` attached to the button:
+
+```html
+<button @click="toggleLikeError()"
+        data-optimistic="
+            likes: hasLiked ? -1 : +1;
+            heartIcon: hasLiked ? '🤍' : '❤️';
+            heartColor: hasLiked ? '#ccc' : '#e25555';
+            hasLiked: toggle
+        "
+        style="background: #dc3545; color: white;">
+    💣 Rollback: Optimista (0ms) + Error del Servidor
+</button>
+```
+
+The counter updates instantly, then reverts exactly 1 second later when the server error arrives.
+
+## Combining with `@Stateless` components
+
+`@Stateless` components hold no server-side state between requests. Every `@Call` invocation reconstructs the component from scratch. Optimistic UI is a natural complement: the client shows immediate feedback while the stateless server processes the request.
+
+<Warning>
+Avoid referencing complex computed state in `data-optimistic` expressions. The expressions only have access to `@State` field values visible in the current DOM. Server-side computed values (e.g. values derived from database queries) cannot be predicted client-side.
+</Warning>
+
+## Limitations
+
+- `data-optimistic` can only mutate fields that are already rendered as `@State` bindings in the current DOM.
+- Expressions are evaluated against the last received state snapshot — if a field has not yet been sent to the client, it cannot be referenced.
+- List mutations (adding or removing items from `SmartList`) are not supported in `data-optimistic`. Use normal `@Call` methods for list operations.
+- Nested field paths (e.g. `state.count`) are not supported — only top-level `@State` field names.

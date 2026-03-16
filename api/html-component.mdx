@@ -1,0 +1,275 @@
+---
+title: "HtmlComponent"
+description: "Abstract base class for all JReactive UI components. Extend this class to define server-rendered, reactive UI components with lifecycle hooks and template rendering."
+---
+
+`HtmlComponent` is the foundation of every JReactive component. It extends `ViewLeaf` (which implements `ViewNode`) and provides the complete lifecycle management, state binding, slot system, and child component tree that the framework operates on.
+
+```
+ViewNode (interface)
+  └─ ViewLeaf (abstract)
+       └─ HtmlComponent (abstract)  ← extend this
+            └─ YourComponent
+```
+
+**Package:** `com.ciro.jreactive`
+
+<Note>
+  Every subclass must have a **no-arg constructor** accessible to JReactive's component factory. If you define a constructor with parameters, also define a public no-arg constructor.
+</Note>
+
+## Class declaration
+
+```java
+public abstract class HtmlComponent extends ViewLeaf implements java.io.Serializable
+```
+
+All components are serializable so they can be stored in distributed session stores (e.g., Redis).
+
+## Methods to override
+
+### `template()`
+
+```java
+protected String template()
+```
+
+Returns the HTML template string for this component. The default implementation looks for a resource file named `ClassName.html` on the classpath (in the same package as the class). Override this method to supply the template inline.
+
+Throw an `IllegalStateException` if neither the override nor the resource file is present.
+
+<ParamField body="return value" type="String" required>
+  An HTML string that may contain JReactive template expressions: `{{binding}}`, `{{#if}}`, `{{#each}}`, `@click`, `name` bindings, and child component tags.
+</ParamField>
+
+```java
+@Override
+protected String template() {
+    return """
+        <div class="counter">
+            <p>Count: <strong>{{count}}</strong></p>
+            <button @click="increment()">+1</button>
+            <button @click="reset()">Reset</button>
+        </div>
+        """;
+}
+```
+
+---
+
+### `onInit()`
+
+```java
+protected void onInit()
+```
+
+Called once the first time the component is instantiated, before the first render. Use it for one-time setup that does not depend on the component being mounted (e.g., seeding initial state, setting computed defaults).
+
+Does nothing by default.
+
+```java
+@Override
+public void onInit() {
+    // Called once before first render
+    clock.set(LocalTime.now().withNano(0).toString());
+}
+```
+
+---
+
+### `onMount()`
+
+```java
+protected void onMount()
+```
+
+Called when the component transitions from `UNMOUNTED` to `MOUNTED` — i.e., when a WebSocket session is established and the component becomes live. Start timers, open resources, or subscribe to external data sources here.
+
+Does nothing by default.
+
+```java
+@Override
+protected void onMount() {
+    timer = new Timer(true);
+    timer.scheduleAtFixedRate(new TimerTask() {
+        @Override public void run() {
+            clock.set(LocalTime.now().withNano(0).toString());
+        }
+    }, 1000, 1000);
+}
+```
+
+---
+
+### `onUnmount()`
+
+```java
+protected void onUnmount()
+```
+
+Called when the component transitions from `MOUNTED` to `UNMOUNTED` — i.e., when the WebSocket session ends or the component is removed from the tree. Release timers, close connections, and clean up resources here.
+
+Does nothing by default. `ReactiveVar` listeners registered via `onChange()` are cleared automatically after `onUnmount()` returns; you do not need to unsubscribe them manually.
+
+```java
+@Override
+protected void onUnmount() {
+    if (timer != null) {
+        timer.cancel();
+        timer = null;
+    }
+}
+```
+
+## Methods available to subclasses
+
+### `updateState(String fieldName)`
+
+```java
+protected void updateState(String fieldName)
+```
+
+Explicitly pushes the current value of a `@State` field to connected browsers. Use this when you mutate the internal fields of a `@State` POJO or when you swap a plain collection reference; the automatic `_syncState()` scan detects top-level field changes but cannot see inside nested objects without this call.
+
+<ParamField query="fieldName" type="String" required>
+  The Java field name (not the annotation `value`) of the `@State` field to push.
+</ParamField>
+
+```java
+@State
+public PageState state = new PageState();
+
+@Call
+public void updateTheme(String theme) {
+    state.ui.theme = theme;  // nested mutation
+    updateState("state");    // explicit push required
+}
+```
+
+---
+
+### `slot()` and `slot(String name)`
+
+```java
+protected String slot()
+protected String slot(String name)
+```
+
+Returns the HTML provided by the parent component for the default slot or for a named slot. Call these methods inside `template()` to define where slotted content is injected.
+
+<ParamField query="name" type="String">
+  Slot name. Omit or pass `"default"` for the default slot.
+</ParamField>
+
+<ResponseField name="return value" type="String">
+  The HTML string provided by the parent, or an empty string if no slot content was supplied.
+</ResponseField>
+
+```java
+@Override
+protected String template() {
+    return "<div class=\"card\">" + slot() + "</div>";
+}
+```
+
+---
+
+### `findChild(String ref, Class<T> type)`
+
+```java
+@SuppressWarnings("unchecked")
+public <T extends HtmlComponent> T findChild(String ref, Class<T> type)
+```
+
+Locates a child component by its `ref` attribute. Searches the live child tree recursively.
+
+<ParamField query="ref" type="String" required>
+  The `ref` value assigned in the template, e.g., `ref="myChild"`.
+</ParamField>
+
+<ParamField query="type" type="Class<T>" required>
+  The expected component class.
+</ParamField>
+
+<ResponseField name="return value" type="T">
+  The matching child component, or `null` if not found.
+</ResponseField>
+
+---
+
+## Internal lifecycle methods
+
+These methods are used by the JReactive runtime and the AOT compiler. You rarely call them directly, but they are `public` so the generated `ComponentAccessor` can reach them from a different package.
+
+| Method | Purpose |
+|---|---|
+| `_initIfNeeded()` | Calls `onInit()` once on first use. |
+| `_mountRecursive()` | Transitions the component and all children to `MOUNTED`, firing `onMount()`. |
+| `_unmountRecursive()` | Transitions the component and all children to `UNMOUNTED`, firing `onUnmount()`. |
+| `_captureStateSnapshot()` | Records a before-call snapshot of all `@State` fields. |
+| `_syncState()` | Compares current `@State` values against the snapshot and fires `ReactiveVar.set()` for changed fields. |
+| `_clearCache()` | Invalidates the cached rendered HTML for this component and all children. |
+| `_state()` | Returns the current `ComponentState` (`MOUNTED` or `UNMOUNTED`). |
+| `_getVersion()` / `_setVersion(long)` | Monotonic version counter used by the delta engine. |
+
+## Complete example
+
+```java
+package com.example;
+
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.Client;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+import com.ciro.jreactive.State;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/tasks")
+@Client
+@StatefulRam
+public class TaskListComponent extends HtmlComponent {
+
+    @State
+    public List<String> tasks = new ArrayList<>();
+
+    @State
+    public String newTask = "";
+
+    @Override
+    public void onInit() {
+        tasks.add("Read the docs");
+        tasks.add("Build something");
+    }
+
+    @Call
+    public void addTask(String task) {
+        if (task == null || task.isBlank()) return;
+        tasks.add(task);
+        newTask = "";
+    }
+
+    @Call
+    public void removeFirst() {
+        if (!tasks.isEmpty()) tasks.remove(0);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div class="task-list">
+                <h2>Tasks ({{tasks.size}})</h2>
+                <ul>
+                    {{#each tasks as task}}
+                        <li>{{task}}</li>
+                    {{/each}}
+                </ul>
+                <input name="newTask" placeholder="New task">
+                <button @click="addTask(newTask)">Add</button>
+                <button @click="removeFirst()">Remove first</button>
+            </div>
+            """;
+    }
+}
+```

@@ -1,0 +1,328 @@
+---
+title: "Spring Boot integration"
+description: "How JReactiveAutoConfiguration wires routes, WebSocket handlers, request queues, and session cleanup into your Spring Boot application."
+---
+
+Adding `jreactive-starter-spring` to your project is all it takes to get JReactive running. Spring Boot's auto-configuration mechanism picks up `JReactiveAutoConfiguration` automatically, and every `@Route`-annotated class in your application package becomes a live WebSocket-backed page.
+
+## `JReactiveAutoConfiguration`
+
+`JReactiveAutoConfiguration` is the entry point for the entire framework integration. On startup it:
+
+1. Calls `AstComponentEngine.installAsDefault()` via `@PostConstruct` — this replaces the default reflection-based engine with the AOT-capable AST engine.
+2. Registers a `CaffeineStateStore` bean unless you provide your own `StateStore` (e.g. the Redis store).
+3. Creates a `CallGuard` bean that runs Jakarta Bean Validation on `@Call` method parameters.
+4. Creates a `PageResolver` bean that resolves route paths to component instances and manages their lifecycle in the state store.
+5. Creates a `JrxHubManager` bean that manages per-session push hubs, optionally wiring in a `JrxMessageBroker` for cross-pod messaging.
+
+```java
+@Configuration
+public class JReactiveAutoConfiguration {
+
+    @Autowired ObjectMapper mapper;
+
+    @PostConstruct
+    public void installEngine() {
+        AstComponentEngine.installAsDefault();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(StateStore.class)
+    public StateStore stateStore() {
+        return new CaffeineStateStore();
+    }
+
+    @Bean
+    public CallGuard callGuard(Validator validator, ObjectMapper mapper) {
+        return new CallGuard(validator, mapper);
+    }
+
+    @Bean
+    public PageResolver pageResolver(RouteProvider routeProvider, StateStore store) {
+        return new PageResolver(routeProvider, store);
+    }
+
+    @Bean
+    public JrxHubManager jrxHubManager(
+            PageResolver pageResolver,
+            ObjectMapper mapper,
+            @Autowired(required = false) JrxMessageBroker broker) {
+        return new JrxHubManager(pageResolver, mapper, broker);
+    }
+}
+```
+
+## WebSocket configuration
+
+Three classes work together to establish the WebSocket connection:
+
+### `WebSocketConfig`
+
+`WebSocketConfig` registers `DelegatingWebSocketHandler` at the `/jrx` endpoint and enables SockJS fallback transport. The `PathInterceptor` is added to extract route metadata from the HTTP handshake request:
+
+```java
+@Configuration
+@EnableWebSocket
+public class WebSocketConfig implements WebSocketConfigurer {
+
+    private final DelegatingWebSocketHandler delegator;
+
+    @Override
+    public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        registry.addHandler(delegator, "/jrx")
+                .addInterceptors(new PathInterceptor())
+                .setAllowedOriginPatterns("*")
+                .withSockJS()
+                .setSessionCookieNeeded(true);
+    }
+}
+```
+
+### `PathInterceptor`
+
+`PathInterceptor` implements `HandshakeInterceptor`. Before the WebSocket handshake completes it reads the `path` and `since` query parameters from the HTTP request and stores them in the WebSocket session attributes. It also reads or creates the HTTP session and stores its ID:
+
+```java
+public class PathInterceptor implements HandshakeInterceptor {
+
+    @Override
+    public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                                   WebSocketHandler wsHandler, Map<String, Object> attributes) {
+        if (request instanceof ServletServerHttpRequest servletRequest) {
+            HttpServletRequest req = servletRequest.getServletRequest();
+            String path = req.getParameter("path");
+            attributes.put("path", path != null ? path : "/");
+
+            String since = req.getParameter("since");
+            attributes.put("since", since != null ? since : "0");
+
+            String sessionId = req.getSession(true).getId();
+            attributes.put("sessionId", sessionId);
+        }
+        return true;
+    }
+}
+```
+
+### `DelegatingWebSocketHandler`
+
+`DelegatingWebSocketHandler` is a `WebSocketHandler` that creates a per-connection `JReactiveSocketHandler` delegate on first connect. This per-connection delegate owns the component lifecycle for that path+session pair. When the connection closes with a normal code (`1000` or `1001`), the handler evicts the component from the state store and the hub manager, freeing memory:
+
+```java
+@Override
+public void afterConnectionClosed(WebSocketSession session, CloseStatus status) throws Exception {
+    var delegate = (WebSocketHandler) session.getAttributes().get("delegate");
+    if (delegate != null) delegate.afterConnectionClosed(session, status);
+
+    Boolean isStatefulRam = (Boolean) session.getAttributes().get("isStatefulRam");
+    if (Boolean.TRUE.equals(isStatefulRam) || !wsConfig.isPersistentState()) {
+        boolean isIntentionalClose = status.getCode() == 1000 || status.getCode() == 1001;
+        boolean hasReason = "route-change".equals(status.getReason());
+        if (path != null && sessionId != null && (isIntentionalClose || hasReason)) {
+            pageResolver.evict(sessionId, path);
+            hubManager.evict(sessionId, path);
+        }
+    }
+}
+```
+
+## `RouteRegistry` and classpath scanning
+
+`RouteRegistry` implements `RouteProvider` and is the Spring-aware route registry. On construction it:
+
+1. Detects your application's base package by finding the `@SpringBootApplication`-annotated class.
+2. Runs a `ClassPathScanningCandidateComponentProvider` to find every class annotated with `@Route`.
+3. For each discovered class it registers a `Supplier<HtmlComponent>` backed by `AutowireCapableBeanFactory.createBean()` — this is the key to full Spring DI support for route components.
+
+```java
+@Component
+public class RouteRegistry implements RouteProvider {
+
+    public RouteRegistry(ApplicationContext ctx) {
+        AutowireCapableBeanFactory beanFactory = ctx.getAutowireCapableBeanFactory();
+
+        String basePackage = "com.ciro"; // fallback
+        var bootApps = ctx.getBeansWithAnnotation(SpringBootApplication.class);
+        if (!bootApps.isEmpty()) {
+            basePackage = bootApps.values().iterator().next().getClass().getPackageName();
+        }
+
+        var scanner = new ClassPathScanningCandidateComponentProvider(false);
+        scanner.addIncludeFilter(new AnnotationTypeFilter(Route.class));
+
+        for (BeanDefinition bd : scanner.findCandidateComponents(basePackage)) {
+            Class<?> clazz = Class.forName(bd.getBeanClassName());
+            Route ann = clazz.getAnnotation(Route.class);
+            if (ann != null && HtmlComponent.class.isAssignableFrom(clazz)) {
+                Supplier<HtmlComponent> sup = () -> beanFactory.createBean(compClass);
+                routes.add(new Entry(ann.path(), sup));
+            }
+        }
+
+        boolean hasRoot = routes.stream().anyMatch(e -> "/".equals(e.template));
+        if (!hasRoot) {
+            throw new IllegalStateException(
+                "Debe existir al menos una ruta @Route(path=\"/\")");
+        }
+    }
+}
+```
+
+Because `createBean()` fully participates in the Spring container lifecycle, route components do **not** need to be annotated `@Component`. The scanner finds them by `@Route` alone, and Spring wires in all `@Autowired` dependencies when the factory supplier is invoked.
+
+## Using `@Autowired` in route components
+
+Because `createBean()` runs the full Spring injection pipeline, you can inject any Spring-managed bean directly into a route component. The `ClientsPage` from the demo project illustrates this:
+
+```java
+@Route(path = "/clients")
+@Client
+public class ClientsPage extends AppPage {
+
+    @Autowired
+    private transient ClientService service;
+
+    @State public List<Client_> clients = new ArrayList<>();
+    @State public Client_ form = new Client_();
+    @State public boolean isModalOpen = false;
+
+    @Override
+    public void onInit() {
+        this.clients = service.findAll();
+    }
+
+    @Call
+    public void save(Client_ form) {
+        service.save(form);
+        this.clients = service.findAll();
+        this.isModalOpen = false;
+    }
+}
+```
+
+<Note>
+Mark injected service fields `transient` when using a persistent state store (Caffeine with `persistentState=true` or Redis). This prevents Jackson or FST from trying to serialize Spring proxy objects into the state snapshot.
+</Note>
+
+## `JrxRequestQueue`: serialized per-session execution
+
+`JrxRequestQueue` ensures that all incoming requests for a given `(sessionId, path)` pair execute strictly one at a time, preventing race conditions between concurrent clicks, form submissions, or `/jrx/set` binding updates.
+
+Each key maps to a `SerialExecutor` — an unbounded FIFO queue backed by a virtual-thread pool. The `SerialExecutor` guarantees that only one task is running at a time for a given key, and schedules the next task immediately after the previous one completes:
+
+```java
+@Component
+public class JrxRequestQueue {
+
+    private final Cache<String, SerialExecutor> queues = Caffeine.newBuilder()
+            .expireAfterAccess(30, TimeUnit.MINUTES)
+            .maximumSize(50_000)
+            .build();
+
+    private final Executor backend = Executors.newVirtualThreadPerTaskExecutor();
+
+    public <T> T run(String sessionId, String path, Callable<T> task) {
+        String key = sessionId + "|" + path;
+        SerialExecutor q = queues.get(key, _k -> new SerialExecutor(backend));
+        return q.submit(task).get();
+    }
+}
+```
+
+The `backend` executor uses Java 21 virtual threads (`newVirtualThreadPerTaskExecutor()`), so blocking operations inside `@Call` methods — database queries, HTTP calls, `Thread.sleep` — do not consume platform threads.
+
+## `SerialExecutor`
+
+`SerialExecutor` is the FIFO task runner used by `JrxRequestQueue`. It uses an `AtomicReference<CompletableFuture<Void>>` tail pointer to chain tasks in arrival order without a lock on the hot path:
+
+```java
+public final class SerialExecutor {
+    private final Executor executor;
+    private final AtomicReference<CompletableFuture<Void>> tail =
+            new AtomicReference<>(CompletableFuture.completedFuture(null));
+
+    public <T> CompletableFuture<T> submit(Callable<T> task) {
+        CompletableFuture<T> out = new CompletableFuture<>();
+        tail.getAndUpdate(prev ->
+            prev.handleAsync((ok, err) -> null, executor)
+                .thenComposeAsync(_x -> {
+                    try {
+                        T val = task.call();
+                        out.complete(val);
+                    } catch (Throwable t) {
+                        out.completeExceptionally(t);
+                    }
+                    return CompletableFuture.completedFuture(null);
+                }, executor)
+        );
+        return out;
+    }
+}
+```
+
+## `SessionCleanupConfig`
+
+`SessionCleanupConfig` registers an `HttpSessionListener` that calls `pageResolver.evictAll(sessionId)` when the HTTP session is destroyed. This releases all component instances and their state for that user from the state store:
+
+```java
+@Configuration
+public class SessionCleanupConfig {
+
+    @Bean
+    public ServletListenerRegistrationBean<HttpSessionListener>
+            httpSessionListener(PageResolver pageResolver) {
+        HttpSessionListener listener = new HttpSessionListener() {
+            @Override
+            public void sessionDestroyed(HttpSessionEvent se) {
+                pageResolver.evictAll(se.getSession().getId());
+            }
+        };
+        var bean = new ServletListenerRegistrationBean<>(listener);
+        bean.setOrder(0);
+        return bean;
+    }
+}
+```
+
+## Configuration properties
+
+All JReactive WebSocket settings are bound under the `jreactive.ws` prefix via `WsConfig`:
+
+```properties
+# application.properties
+
+# Enable back-pressure (drop events if queue exceeds maxQueue). Default: true
+jreactive.ws.enabledBackpressure=true
+
+# Maximum pending events in the outbound queue per session. Default: 512
+jreactive.ws.maxQueue=512
+
+# DOM flush interval in milliseconds. Default: 16
+jreactive.ws.flushIntervalMs=16
+
+# Persist component state across WebSocket reconnects. Default: true
+jreactive.ws.persistentState=true
+```
+
+| Property | Type | Default | Description |
+|---|---|---|---|
+| `jreactive.ws.enabledBackpressure` | `boolean` | `true` | Drop queued events when `maxQueue` is exceeded |
+| `jreactive.ws.maxQueue` | `int` | `512` | Max pending outbound events per session |
+| `jreactive.ws.flushIntervalMs` | `int` | `16` | DOM update flush interval in milliseconds |
+| `jreactive.ws.persistentState` | `boolean` | `true` | Keep component state alive across reconnects |
+
+## Scheduled executor
+
+`WsResourcesConfig` registers a `ScheduledExecutorService` bean used for periodic DOM flush tasks. The pool size matches the number of available CPU cores:
+
+```java
+@Configuration
+public class WsResourcesConfig {
+
+    @Bean(destroyMethod = "shutdownNow")
+    ScheduledExecutorService jreactiveExecutor() {
+        int cores = Runtime.getRuntime().availableProcessors();
+        return Executors.newScheduledThreadPool(cores);
+    }
+}
+```

@@ -1,0 +1,170 @@
+---
+title: "Type"
+description: "Ergonomic record wrapper around ReactiveVar<T>. The recommended way to declare reactive fields in HtmlComponent subclasses — no annotation processing required."
+---
+
+`Type<T>` is a Java `record` that wraps a `ReactiveVar<T>`. It provides the same `get()` / `set()` API as `ReactiveVar` directly, plus a static factory shorthand. It is the idiomatic way to declare `@Bind` reactive fields in components.
+
+**Package:** `com.ciro.jreactive`
+
+```java
+public record Type<T>(ReactiveVar<T> rx)
+```
+
+## Factory methods
+
+### `Type.of(U initial)`
+
+```java
+public static <U> Type<U> of(U initial)
+```
+
+Creates a new `Type<U>` wrapping a fresh `ReactiveVar<U>` initialized to `initial`.
+
+<ParamField query="initial" type="U" required>
+  The initial value for the reactive variable. May be `null`.
+</ParamField>
+
+<ResponseField name="return value" type="Type<U>">
+  A new `Type<U>` instance.
+</ResponseField>
+
+```java
+Type<String> label = Type.of("Click me");
+Type<Integer> score = Type.of(0);
+```
+
+---
+
+### `Type.$(U initial)`
+
+```java
+public static <U> Type<U> $(U initial)
+```
+
+Alias for `Type.of()`. Designed to be used with a static import to create a very concise field declaration syntax.
+
+<ParamField query="initial" type="U" required>
+  The initial value.
+</ParamField>
+
+<ResponseField name="return value" type="Type<U>">
+  A new `Type<U>` instance, identical to `Type.of(initial)`.
+</ResponseField>
+
+```java
+import static com.ciro.jreactive.Type.$;
+
+@Bind public Type<String> clock = $("--:--:--");
+@Bind public Type<Boolean> visible = $(Boolean.TRUE);
+```
+
+## Instance methods
+
+### `get()`
+
+```java
+public T get()
+```
+
+Returns the current value by delegating to `rx().get()`.
+
+<ResponseField name="return value" type="T">
+  The current stored value.
+</ResponseField>
+
+---
+
+### `set(T value)`
+
+```java
+public void set(T value)
+```
+
+Stores `value` and fires all listeners by delegating to `rx().set(value)`. This triggers a WebSocket push to the browser if the owning component is mounted.
+
+<ParamField query="value" type="T" required>
+  The new value.
+</ParamField>
+
+---
+
+### `rx()`
+
+```java
+public ReactiveVar<T> rx()
+```
+
+Returns the underlying `ReactiveVar<T>`. Use this when you need to call `onChange()` directly.
+
+<ResponseField name="return value" type="ReactiveVar<T>">
+  The wrapped `ReactiveVar`.
+</ResponseField>
+
+```java
+@Bind public Type<String> greet = $("Hello");
+
+@Override
+public void onInit() {
+    greet.rx().onChange(value ->
+        System.out.println("Greeting changed to: " + value));
+}
+```
+
+## How `Type<T>` differs from `ReactiveVar<T>`
+
+| | `ReactiveVar<T>` | `Type<T>` |
+|---|---|---|
+| Kind | Final class | Record |
+| Typical use | Framework internals, advanced use | `@Bind` field declarations |
+| Construction | `new ReactiveVar<>(value)` | `Type.of(value)` or `$(value)` |
+| `get()` / `set()` | Direct | Delegates to wrapped `ReactiveVar` |
+| `onChange()` | Direct method | Via `rx().onChange()` |
+| Equals / hashCode | Identity-based | Record structural equality on `rx` |
+
+Both wires up identically inside the framework: when `HtmlComponent.buildBindings()` processes a `@Bind` field, it unwraps the `ReactiveVar` from a `Type<T>` automatically.
+
+<Note>
+  Prefer `Type<T>` for `@Bind` fields. Use `ReactiveVar<T>` directly only when you need direct access to `onChange()` or when working with framework internals.
+</Note>
+
+## Field declaration patterns
+
+```java
+import static com.ciro.jreactive.Type.$;
+
+public class ClockLeaf extends HtmlComponent {
+
+    // Two-way bound — reflects input changes from the browser
+    @Bind public Type<String> greet = $("Hello");
+
+    // Server-driven — only the server writes this value
+    @Bind public Type<String> clock = $("--:--:--");
+
+    @Override
+    public void onInit() {
+        // Set server time immediately before first render
+        clock.set(LocalTime.now().withNano(0).toString());
+    }
+
+    @Override
+    protected void onMount() {
+        Timer timer = new Timer(true);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override public void run() {
+                clock.set(LocalTime.now().withNano(0).toString());
+            }
+        }, 1000, 1000);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div class="clock">
+                <h1>{{greet}}, the time is {{clock}}!</h1>
+                <input name="greet" placeholder="Type greeting">
+            </div>
+            """;
+    }
+}
+```

@@ -1,0 +1,113 @@
+---
+title: "@Layout"
+description: "Wraps a component in a layout shell. The layout component's default slot receives the page content, enabling shared navigation, headers, and footers."
+---
+
+`@Layout` specifies that a component should be rendered inside a layout shell. When a full-page request arrives, the runtime instantiates the layout class, injects the page's rendered HTML into its default `<slot />`, and returns the complete document.
+
+**Package:** `com.ciro.jreactive.router`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+**Meta-annotation:** `@Inherited` — a `@Layout` annotation on an abstract base class is automatically applied to all concrete subclasses.
+
+## Annotation elements
+
+<ParamField body="value" type="Class<? extends HtmlComponent>" required>
+  The layout component class. This class must extend `HtmlComponent` and define a `<slot />` element in its `template()` to indicate where the page content is injected.
+</ParamField>
+
+## Behavior
+
+1. **Full-page requests only.** `@Layout` wrapping happens when `renderLayout = true` (i.e., the initial browser request, not a SPA navigation). Partial AJAX navigations skip the layout and receive the page HTML directly.
+2. **Fresh layout instance per request.** The runtime creates a new instance of the layout class for each full-page render. The layout itself does not maintain session state.
+3. **Default slot injection.** The runtime calls `layout._setSlots(Map.of("default", page.render()))` before rendering the layout. The layout's `<slot />` element is replaced with the page HTML.
+4. **Inherited layouts.** Because `@Layout` is meta-annotated with `@Inherited`, you can annotate an abstract base class once and all concrete subclasses automatically use that layout — the `AppPage` pattern.
+
+<Note>
+  If the layout's `render()` throws an exception, the runtime falls back to returning the page HTML without a layout wrapper.
+</Note>
+
+## AppPage pattern
+
+Define a shared abstract base class that carries the `@Layout` annotation. All concrete pages extend it:
+
+```java
+// Abstract base — carries the layout for all pages
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.router.Layout;
+
+@Layout(MainLayout.class)
+public abstract class AppPage extends HtmlComponent {}
+```
+
+```java
+// Concrete page — inherits @Layout(MainLayout.class)
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/")
+public class HomePage extends AppPage {
+
+    @Override
+    protected String template() {
+        return "<p>Home page content</p>";
+    }
+}
+```
+
+## Defining a layout component
+
+The layout component is a plain `HtmlComponent`. It renders the full HTML document and uses `<slot />` to inject page content:
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+
+public class MainLayout extends HtmlComponent {
+
+    @Override
+    protected String template() {
+        return """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <title>My App</title>
+            </head>
+            <body>
+                <nav>
+                    <a href="/" data-router>Home</a>
+                    <a href="/about" data-router>About</a>
+                </nav>
+                <main id="app">
+                    <slot />
+                </main>
+                <script src="/js/jreactive-runtime.js"></script>
+            </body>
+            </html>
+            """;
+    }
+}
+```
+
+## Overriding the layout in a subclass
+
+A concrete page can override the inherited layout by declaring its own `@Layout`:
+
+```java
+@Route(path = "/admin")
+@Layout(AdminLayout.class)   // overrides @Layout(MainLayout.class) from AppPage
+public class AdminPage extends AppPage {
+
+    @Override
+    protected String template() {
+        return "<h1>Admin dashboard</h1>";
+    }
+}
+```
+
+## Related
+
+- [`@Route`](/api/annotations/route) — maps the component to a URL path
+- [HtmlComponent](/api/html-component) — base class; `slot()` and `slot(String name)` for rendering slots

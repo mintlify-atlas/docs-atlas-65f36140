@@ -1,0 +1,211 @@
+---
+title: "@Call"
+description: "Marks a method as browser-callable. The JReactive runtime exposes each @Call method as a POST endpoint and handles rate limiting, Bean Validation, and state diffing automatically."
+---
+
+`@Call` marks a method as browser-callable. The JS runtime invokes it by sending a `POST /call/{ComponentId.methodName}` request. The server deserializes the JSON argument list, validates parameters with Bean Validation, enforces rate limiting, executes the method, computes a state diff, and returns a delta batch.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `METHOD`
+
+**Retention:** `RUNTIME`
+
+## Annotation elements
+
+<ParamField body="sync" type="boolean" default="true">
+  When `true`, the runtime persists component state after the method returns (only relevant for `@Stateful` components). When `false`, the state is not saved, which can be useful for read-only queries or fire-and-forget operations where you do not want to trigger a store write.
+</ParamField>
+
+## HTTP endpoint
+
+Every `@Call` method is reachable at:
+
+```
+POST /call/{ComponentId.methodName}
+```
+
+The request body is a JSON object:
+
+```json
+{
+  "args": [arg0, arg1, ...],
+  "stateToken": "<token>"   // @Stateless components only
+}
+```
+
+Arguments are deserialized in order using Jackson. The component ID is the fully-qualified component identifier built from the session, path, and component class name.
+
+### Calling a root component method
+
+For the root component (the page itself), you may omit the component ID prefix and use just the method name:
+
+```
+POST /call/increment
+POST /call/PageId.increment    ← equivalent
+```
+
+## Rate limiting
+
+Every `@Call` is guarded by Bucket4j with a limit of **60 requests per second per session + method combination**. When the limit is exceeded, the runtime returns:
+
+```json
+{
+  "ok": false,
+  "code": "RATE_LIMIT",
+  "error": "Too many calls, try again in a moment"
+}
+```
+
+Rate-limit buckets expire after 1 hour of inactivity and are capped at 50,000 entries to prevent memory exhaustion.
+
+## Bean Validation
+
+Annotate method parameters with Jakarta Validation constraints. If any constraint fails, the method body is never executed and the runtime returns a structured validation error:
+
+```json
+{
+  "ok": false,
+  "code": "VALIDATION",
+  "error": "Name is required",
+  "violations": [
+    {
+      "param": "register.form.name",
+      "path": "form.name",
+      "message": "Name is required",
+      "constraint": "NotBlank"
+    }
+  ]
+}
+```
+
+Use `@Valid` on a DTO parameter to trigger cascading validation:
+
+```java
+@Call
+public void register(@Valid SignupForm form) {
+    // Only reached when all constraints pass
+}
+```
+
+## Response envelope
+
+A successful `@Call` returns:
+
+```json
+{
+  "ok": true,
+  "result": <return value or absent>,
+  "batch": [
+    { "k": "fieldName", "v": <newValue> }
+  ]
+}
+```
+
+For `@Stateless` components, the response also includes a renewed state token:
+
+```json
+{
+  "ok": true,
+  "newStateToken": "<base64lz4.hmac>",
+  "batch": [...]
+}
+```
+
+For `@DomMode(SERVER_OWNED)` components, the response includes a full HTML fragment instead of a delta batch:
+
+```json
+{
+  "ok": true,
+  "html": "<div>...</div>"
+}
+```
+
+## Examples
+
+### Simple counter
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/counter")
+@StatefulRam
+public class CounterPage extends HtmlComponent {
+
+    @State
+    public int count = 0;
+
+    @Call
+    public void increment() {
+        count++;
+    }
+
+    @Call
+    public void reset() {
+        count = 0;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <p>Count: {{count}}</p>
+                <button @click="increment()">+1</button>
+                <button @click="reset()">Reset</button>
+            </div>
+            """;
+    }
+}
+```
+
+### Bean Validation with a DTO
+
+```java
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+import java.io.Serializable;
+
+public static class SignupForm implements Serializable {
+    @NotBlank(message = "Name is required")
+    public String name;
+
+    @NotBlank @Email(message = "Invalid email format")
+    public String email;
+
+    @NotBlank @Size(min = 8, message = "Password must be at least 8 characters")
+    public String password;
+}
+
+@State
+PageState state = new PageState();
+
+@Call
+public void register(@Valid SignupForm form) {
+    // Validation has already passed at this point
+    state.message = "User " + form.name + " registered";
+    updateState("state");
+}
+```
+
+### Async (no persistence after call)
+
+```java
+@Call(sync = false)
+public void logEvent(String eventName) {
+    // Fire-and-forget: state is NOT persisted after this method returns
+    auditService.log(eventName);
+}
+```
+
+## Related
+
+- [`@State`](/api/annotations/state) — declares reactive state fields that are diffed after each `@Call`
+- [`@Stateless`](/api/annotations/stateless) — stateless components receive and return `newStateToken` on every call
+- [`@DomMode`](/api/annotations/dommode) — controls whether the response contains deltas or full HTML
+- [HtmlComponent](/api/html-component) — base class; `updateState()` for explicit state pushes

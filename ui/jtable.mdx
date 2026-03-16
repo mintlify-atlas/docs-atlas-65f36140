@@ -1,0 +1,200 @@
+---
+title: "JTable"
+description: "A reactive data table with column definitions, server-side data binding, and row click handling."
+---
+
+`JTable` renders a styled HTML table with a `<thead>` driven by the `columns` list and a `<tbody>` driven by the `data` list. Each `<tr>` in the body renders the component's `<slot />`, which you fill with `<td>` elements in the parent template. An empty data set displays a "no data" message automatically.
+
+## Properties
+
+<ParamField path="columns" type="List&lt;String&gt;" default="[]">
+  The column header labels rendered in `<thead>`. The order matches the order of `<td>` elements you provide inside the slot.
+</ParamField>
+
+<ParamField path="data" type="List&lt;? extends Serializable&gt;" default="[]">
+  The list of row objects. Each item in the list generates one `<tr>`. Annotate this field with `@State` on the parent component so the table re-renders when the list changes.
+</ParamField>
+
+<ParamField path="onRowClick" type="String" default="">
+  The `@Call` expression attached to the `@click` event on every `<tr>`. You can use the `expose` attribute to pass the current row object as an argument.
+</ParamField>
+
+## Column definitions
+
+Pass column header strings directly as a `List<String>`. Use `@Bind` on the parent field so the column list is sent to the component at render time:
+
+```java
+@Bind public List<String> headers = List.of("ID", "Name", "Email", "Actions");
+```
+
+```html template
+<JTable :columns="headers" :data="users" expose="row">
+    <td>{{row.id}}</td>
+    <td>{{row.name}}</td>
+    <td>{{row.email}}</td>
+    <td>...</td>
+</JTable>
+```
+
+## Data binding
+
+Declare the data list as `@State` on the page. Any mutation (adding, removing, or replacing the list) automatically triggers a re-render of the table body:
+
+```java
+@State public List<UserData> users = new ArrayList<>();
+
+@Override
+public void onInit() {
+    this.users = userService.findAll();
+}
+```
+
+## Row click handling with expose
+
+Use the `expose` attribute to name the loop variable, then reference it in click handlers inside the slot:
+
+```html template
+<JTable :columns="headers" :data="users" expose="row">
+    <td>{{row.name}}</td>
+    <td>
+        <button @click="editUser(row)">Edit</button>
+        <button @click="deleteUser(row)">Delete</button>
+    </td>
+</JTable>
+```
+
+```java
+@Call
+public void editUser(UserData user) {
+    this.selectedUser = user;
+    this.isModalOpen = true;
+}
+
+@Call
+public void deleteUser(UserData user) {
+    users.removeIf(u -> u.id == user.id);
+}
+```
+
+## Usage example
+
+```html template
+<JTable :columns="headers" :data="users" expose="row">
+    <td>{{row.id}}</td>
+    <td><strong>{{row.name}}</strong></td>
+    <td>{{row.email}}</td>
+    <td>
+        <button @click="deleteUser(row)"
+                style="color: red; border: none; background: none; cursor: pointer;">
+            Delete
+        </button>
+    </td>
+</JTable>
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Bind;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.Client;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
+
+@Route(path = "/users")
+@Client
+public class UsersPage extends AppPage {
+
+    public static class UserData implements Serializable {
+        public int id;
+        public String name;
+        public String email;
+
+        public UserData(int id, String name, String email) {
+            this.id = id;
+            this.name = name;
+            this.email = email;
+        }
+    }
+
+    @Bind public List<String> headers = List.of("ID", "Name", "Email", "Actions");
+    @State public List<UserData> users = new ArrayList<>();
+
+    @Override
+    public void onInit() {
+        this.users = List.of(
+            new UserData(1, "Alice", "alice@example.com"),
+            new UserData(2, "Bob", "bob@example.com")
+        );
+    }
+
+    @Call
+    public void deleteUser(UserData user) {
+        users.removeIf(u -> u.id == user.id);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div style="padding: 20px;">
+                <JTable :columns="headers" :data="users" expose="row">
+                    <td>{{row.id}}</td>
+                    <td>{{row.name}}</td>
+                    <td>{{row.email}}</td>
+                    <td>
+                        <button @click="deleteUser(row)">Delete</button>
+                    </td>
+                </JTable>
+                <p>Total: {{users.size}} users</p>
+            </div>
+        """;
+    }
+}
+```
+
+## Real-world example
+
+From `TableTestPage` — a user management table with add and delete actions:
+
+```java
+@Bind public List<String> headers = List.of("ID", "Nombre", "Email", "Acciones");
+
+@State public List<UserData> users = new ArrayList<>(List.of(
+    new UserData(1, "Ciro", "ciro@jreactive.com"),
+    new UserData(2, "Compa AI", "bot@jreactive.com")
+));
+
+@Call
+public void addUser() {
+    idCounter++;
+    users.add(new UserData(idCounter, "Nuevo " + idCounter, "user" + idCounter + "@test.com"));
+}
+
+@Call
+public void deleteUser(UserData user) {
+    users.removeIf(u -> u.id == user.id);
+}
+```
+
+```html template
+<JTable :columns="headers" :data="users" expose="row">
+    <td>{{row.id}}</td>
+    <td><strong>{{row.name}}</strong></td>
+    <td>{{row.email}}</td>
+    <td>
+        <button @click="deleteUser(row)"
+                style="color: red; border: none; background: none; cursor: pointer;">
+            Delete
+        </button>
+    </td>
+</JTable>
+<p style="margin-top: 15px; color: #666;">Total: {{users.size}} usuarios</p>
+```
+
+<Note>
+  The `data` field is annotated with `@State` directly on `JTable`. When you bind `:data="users"` from the parent, JReactive passes the list reference and re-renders the tbody whenever the parent's `users` state changes.
+</Note>

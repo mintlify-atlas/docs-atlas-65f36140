@@ -1,0 +1,92 @@
+---
+title: "UI components overview"
+description: "Ready-to-use reactive UI components shipped with the jreactive-ui library."
+---
+
+The `jreactive-ui` library ships with nine pre-built components that integrate directly into any JReactive application. Each component is a standard `HtmlComponent` subclass with `@Bind` fields you set from Java — no JavaScript configuration needed.
+
+## Maven dependency
+
+```xml pom.xml
+<dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-ui</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+</dependency>
+```
+
+<Note>
+  All JReactive artifacts are distributed via [JitPack](https://jitpack.io). Make sure the JitPack repository is declared in your `pom.xml` before adding this dependency. See the [Quickstart](/quickstart) for full repository configuration.
+</Note>
+
+## Components
+
+<Columns cols={3}>
+  <Card title="JButton" icon="hand-pointer" href="/ui/jbutton">
+    A clickable button with label, variant, loading state, and disabled support.
+  </Card>
+  <Card title="JInput" icon="input-text" href="/ui/jinput">
+    A labeled text input with placeholder, help text, and event callbacks.
+  </Card>
+  <Card title="JSelect" icon="chevron-down" href="/ui/jselect">
+    A dropdown select with typed options, enum helpers, and change callbacks.
+  </Card>
+  <Card title="JCheckBox" icon="square-check" href="/ui/jcheckbox">
+    A checkbox with two-way binding, label, and change callback.
+  </Card>
+  <Card title="JForm" icon="table-list" href="/ui/jform">
+    A form container with title, layout mode, and submit callback.
+  </Card>
+  <Card title="JTable" icon="table" href="/ui/jtable">
+    A data table with column definitions, reactive data binding, and row click handling.
+  </Card>
+  <Card title="JCard" icon="square" href="/ui/jcard">
+    A styled card container with title, subtitle, variant, and named footer slot.
+  </Card>
+  <Card title="JModal" icon="window-maximize" href="/ui/jmodal">
+    A modal dialog controlled by a server-side boolean state field.
+  </Card>
+  <Card title="Link" icon="link" href="/ui/link">
+    An SPA-aware anchor that triggers client-side navigation via `data-router`.
+  </Card>
+</Columns>
+
+## How component binding works
+
+All `jreactive-ui` components use `@Bind` fields. When you place a component tag in your template, you pass values using standard attribute syntax or the reactive `:field="expr"` binding syntax:
+
+```html template
+<!-- Static string -->
+<JButton label="Save" type="primary" onClick="save()" />
+
+<!-- Reactive binding: evaluates the expression against server state -->
+<JButton :label="buttonLabel" :disabled="isSaving" onClick="save()" />
+```
+
+On the Java side you set defaults or update them from `@Call` methods:
+
+```java
+public class MyPage extends AppPage {
+
+    @State public boolean isSaving = false;
+    @Bind public String buttonLabel = "Save";
+
+    @Call
+    public void save() {
+        this.isSaving = true;
+        // ... perform work ...
+        this.isSaving = false;
+    }
+}
+```
+
+## Package
+
+All components are in the `com.ciro.jreactive` package. Import them with:
+
+```java
+import com.ciro.jreactive.JButton;
+import com.ciro.jreactive.JInput;
+import com.ciro.jreactive.JSelect;
+// etc.
+```

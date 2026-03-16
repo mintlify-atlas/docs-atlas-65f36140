@@ -1,0 +1,177 @@
+---
+title: "Scoped CSS"
+description: "Co-locate CSS files with your Java components. The APT processor scopes and minifies them at compile time using the ph-css library."
+---
+
+JReactive lets you write CSS for a component in a dedicated `.css` file placed next to the `.java` file. The `jreactive-apt` annotation processor reads this file at compile time, scopes every selector to the component's root element using a unique class, minifies the output, and embeds it in the generated `__Accessor` class. No build plugin configuration beyond the APT processor is required.
+
+## How scoping works
+
+The `CssScoper` utility (backed by the [ph-css](https://github.com/phax/ph-css) library) parses the raw CSS into an AST, rewrites every selector to include a component-specific scope class, and serializes the result as minified CSS.
+
+For a component named `ColorBox`, the scope class is `jrx-sc-ColorBox`.
+
+### Selector transformation rules
+
+| Input selector | Output selector |
+|---|---|
+| `.demo-box` | `.jrx-sc-ColorBox .demo-box` |
+| `.demo-box:hover` | `.jrx-sc-ColorBox .demo-box:hover` |
+| `:host` | `.jrx-sc-ColorBox` |
+| `:host .active` | `.jrx-sc-ColorBox .active` |
+
+The `:host` pseudo-class maps to the component's root element, consistent with the Web Components spec.
+
+## Co-locating CSS files
+
+Place a `.css` file with the same base name as the Java class in the same source directory:
+
+```
+src/main/java/com/ciro/jreactive/
+├── ColorBox.java
+└── ColorBox.css
+```
+
+The processor locates the CSS file by replacing the `.java` extension of the source file with `.css`.
+
+## Real example: `ColorBox`
+
+### `ColorBox.java`
+
+```java
+public class ColorBox extends HtmlComponent {
+
+    @Bind String text = "¡Hazme Click!";
+
+    @Override
+    protected String template() {
+        return """
+            <div style="display: contents;">
+            <div class="demo-box-container">
+                <div class="demo-box" onclick="animateBox(this)">
+                    <span class="demo-label">{{text}}</span>
+                </div>
+                <small>Estilo y Lógica cargados automáticamente</small>
+            </div>
+            </div>
+        """;
+    }
+}
+```
+
+### `ColorBox.css`
+
+```css
+/* ColorBox.css */
+.demo-box-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    margin: 20px;
+    font-family: sans-serif;
+}
+
+.demo-box {
+    width: 150px;
+    height: 150px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 15px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.19), 0 6px 6px rgba(0,0,0,0.23);
+    transition: all 0.3s cubic-bezier(.25,.8,.25,1);
+    user-select: none;
+}
+
+.demo-box:hover {
+    box-shadow: 0 14px 28px rgba(0,0,0,0.25), 0 10px 10px rgba(0,0,0,0.22);
+    transform: translateY(-5px);
+}
+```
+
+### Generated scoped output (minified)
+
+```css
+.jrx-sc-ColorBox .demo-box-container{display:flex;flex-direction:column;align-items:center;margin:20px;font-family:sans-serif}
+.jrx-sc-ColorBox .demo-box{width:150px;height:150px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);border-radius:15px;display:flex;justify-content:center;align-items:center;color:#fff;font-weight:700;cursor:pointer;box-shadow:0 10px 20px rgba(0,0,0,.19),0 6px 6px rgba(0,0,0,.23);transition:all .3s cubic-bezier(.25,.8,.25,1);user-select:none}
+.jrx-sc-ColorBox .demo-box:hover{box-shadow:0 14px 28px rgba(0,0,0,.25),0 10px 10px rgba(0,0,0,.22);transform:translateY(-5px)}
+```
+
+## How the APT processor reads and scopes CSS
+
+In `TemplateProcessor`, the `tryReadCssFile()` method locates the `.css` file relative to the `.java` source file using the `Trees` API:
+
+```java
+private String tryReadCssFile(TypeElement clazz) {
+    if (this.trees != null) {
+        TreePath path = trees.getPath(clazz);
+        if (path != null) {
+            JavaFileObject sourceFile = path.getCompilationUnit().getSourceFile();
+            Path javaNioPath = Paths.get(sourceFile.toUri());
+            String cssPathStr = javaNioPath.toString().replace(".java", ".css");
+            File file = new File(cssPathStr);
+            if (file.exists()) return Files.readString(file.toPath());
+        }
+    }
+    // fallback: src/main/java/{package}/{ClassName}.css
+    ...
+}
+```
+
+Once the raw CSS is read, `generateCssMethod()` calls `CssScoper.scope()` and writes the result as a string literal into `getScopedCss()` in the generated accessor:
+
+```java
+private void generateCssMethod(Writer w, TypeElement clazz, String rawCss) throws IOException {
+    w.write("    @Override\n");
+    w.write("    public String getScopedCss() {\n");
+    if (rawCss == null || rawCss.isBlank()) {
+        w.write("        return \"\";\n    }\n\n");
+        return;
+    }
+    String scopeId = "jrx-sc-" + clazz.getSimpleName().toString();
+    String scoped = CssScoper.scope(rawCss, scopeId);
+    w.write("        return \"" + escapeJavaString(scoped) + "\";\n");
+    w.write("    }\n\n");
+}
+```
+
+## How scoped CSS is delivered to the browser
+
+When a component renders, the runtime calls `getScopedCss()` on the component's accessor. If the result is non-empty, the CSS is embedded in a `<style>` tag with a `data-resource` attribute before the component's HTML:
+
+```html
+<style data-resource="ColorBox">
+  .jrx-sc-ColorBox .demo-box{...}
+</style>
+<div style="display: contents;">
+  ...
+</div>
+```
+
+The `data-resource` attribute ensures the runtime injects each component's CSS only once per page, even if the component appears multiple times.
+
+## `@keyframes` and `@media` rules
+
+`CssScoper` handles `@media` blocks recursively — all selectors inside a media query are scoped. `@keyframes` rules are intentionally left unscoped, because animation names are global identifiers and scoping them would break `animation-name` references:
+
+```java
+private static void scopeRules(List<ICSSTopLevelRule> rules, String scopeId) {
+    for (ICSSTopLevelRule rule : rules) {
+        if (rule instanceof CSSStyleRule styleRule) {
+            processStyleRule(styleRule, scopeId);
+        } else if (rule instanceof CSSMediaRule mediaRule) {
+            scopeRules(mediaRule.getAllRules(), scopeId); // recursive
+        } else if (rule instanceof CSSKeyframesRule) {
+            // intentionally unscoped
+        }
+    }
+}
+```
+
+<Note>
+CSS syntax errors in a `.css` file cause `CssScoper` to return an empty string and print a warning. The component still renders, but without its scoped styles. Check the Maven build output for `⚠️ JReactive: Error de sintaxis CSS` messages.
+</Note>

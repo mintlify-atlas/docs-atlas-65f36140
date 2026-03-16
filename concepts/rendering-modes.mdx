@@ -1,0 +1,198 @@
+---
+title: "Rendering modes"
+description: "JReactive supports four rendering modes — SSR, CSR (@Client), SERVER_OWNED (@DomMode), and Stateless (@Stateless). Choose the mode that fits your latency, memory, and SEO requirements."
+---
+
+JReactive components can render in four distinct modes. The default mode (SSR with WebSocket hydration) suits most use cases. The other three trade different properties — memory usage, client-side performance, or horizontal scalability — and can be mixed within the same application.
+
+## Mode overview
+
+| Mode | Annotation | Initial render | DOM updates | Server memory |
+|---|---|---|---|---|
+| SSR (default) | _(none)_ | Server → full HTML | JSON deltas over WebSocket | Yes — Caffeine or Redis |
+| CSR | `@Client` | Server → JS shell | APT-generated JS templates | Yes — `@StatefulRam` or Redis |
+| SERVER_OWNED | `@DomMode(SERVER_OWNED)` | Server → full HTML | Full HTML fragment over WebSocket | Yes — any store |
+| Stateless | `@Stateless` | Server → HTML + signed token | JSON deltas + new token | No — state in browser |
+
+## SSR — server-side rendering (default)
+
+The default mode. No annotation required.
+
+On the first HTTP request JReactive renders the full HTML snapshot and sends it to the browser. The client runtime opens a WebSocket connection, subscribes to binding updates, and applies JSON deltas incrementally using Idiomorph DOM morphing.
+
+```java
+@Route(path = "/store-test")
+public class StoreTestPage extends AppPage {
+
+    @State
+    public StoreState store = new StoreState();
+
+    @Call
+    public void setBackendDark() {
+        store.ui.theme  = "dark";
+        store.ui.source = "backend:setDark";
+        updateState("store");
+    }
+
+    @Override
+    public String template() {
+        return """
+            <p>Theme: <b>{{store.ui.theme}}</b></p>
+            <button @click="setBackendDark()">Dark</button>
+        """;
+    }
+}
+```
+
+**When to use:** General-purpose pages that need SEO-friendly initial HTML and real-time updates.
+
+## `@Client` — client-side rendering
+
+Annotate a component with `@Client` to enable CSR mode. The APT annotation processor (`jreactive-apt`) generates a JavaScript template at compile time. On first load the server sends a lightweight shell (`data-jrx-client`) containing the initial state as JSON. The browser evaluates the JS template and renders the DOM locally.
+
+Subsequent updates arrive as JSON state deltas — no HTML string in the payload. The JS template re-evaluates changed bindings and patches the DOM.
+
+```java
+@Route(path = "/signup")
+@StatefulRam
+@Client
+public class SignupPage extends AppPage {
+
+    @State
+    PageState state = new PageState();
+
+    @Call
+    public void register(@Valid SignupForm form) {
+        state.lastMessage = "User " + form.name + " registered";
+        updateState("state");
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <section>
+              <label>Name: <input type="text" name="form.name"></label>
+              <button @click="register(form)">Register</button>
+              <p data-if="state.lastMessage">{{state.lastMessage}}</p>
+            </section>
+            """;
+    }
+}
+```
+
+`@Client` is typically combined with `@StatefulRam` to keep component instances in local JVM memory — serialization to Redis is not needed because the heavy work happens in the browser:
+
+```java
+@Client @StatefulRam
+public class CounterLeaf extends BaseCounter { ... }
+```
+
+**When to use:** Highly interactive components with frequent, fine-grained updates. Offloads DOM work to the client.
+
+<Note>
+  `@Client` components require the `jreactive-apt` annotation processor at compile time to generate the JS template. Without it, the component falls back to SSR.
+</Note>
+
+## `@DomMode(SERVER_OWNED)` — HTML on the wire
+
+Annotate a component with `@DomMode(JrxDomMode.SERVER_OWNED)` to have the server evaluate all conditionals and loops, and return a complete HTML fragment on every `@Call` invocation. No JSON deltas, no JS template — just fresh HTML morphed into the DOM by Idiomorph.
+
+```java
+@Route(path = "/server-owned")
+@DomMode(JrxDomMode.SERVER_OWNED)
+@Stateless
+public class ServerOwnedTestPage extends AppPage {
+
+    @State public int counter = 0;
+    @State public boolean showSecret = false;
+    @State public List<String> logs = new ArrayList<>(List.of("Server started"));
+
+    @Call
+    public void interact() {
+        counter++;
+        showSecret = !showSecret;
+        logs.add("Interaction #" + counter + " processed in Java");
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h2>Counter: <span>{{counter}}</span></h2>
+
+                {{#if showSecret}}
+                    <div>Secret revealed!</div>
+                {{/if}}
+                {{#if !showSecret}}
+                    <div>Secret is hidden.</div>
+                {{/if}}
+
+                <button @click="interact()">Interact</button>
+
+                <ul>
+                    {{#each logs as log}}
+                        <li>{{log}}</li>
+                    {{/each}}
+                </ul>
+            </div>
+        """;
+    }
+}
+```
+
+After each `@Call`, `JrxHttpApi` clears the render cache (`_clearCache()`), re-renders the full template server-side, and returns `{html: "<div>...</div>"}` in the response envelope. The browser morphs the existing DOM.
+
+**When to use:** Components where simplicity matters more than delta size. No client-side template engine required. Also useful when `@Stateless` is combined — state is carried in a signed token, and each interaction produces a self-contained HTML payload.
+
+## `@Stateless` — zero server memory
+
+Annotate a component with `@Stateless` to eliminate server-side state entirely. On the initial render, JReactive serializes the component's binding map, signs it with HMAC-SHA256, compresses it with LZ4, and embeds the token in the page as a `<meta name="jrx-state">` tag. The component lives nowhere on the server.
+
+On every `@Call` invocation:
+
+1. The browser sends the token in the request body as `stateToken`.
+2. `JrxHttpApi` decodes and verifies the token.
+3. The state is hydrated into the component's `ReactiveVar` map.
+4. The `@Call` method executes.
+5. A new token is signed and returned alongside the state deltas.
+
+The token format is: `base64url(lz4(json(state))) + "." + hmac_sha256`.
+
+```java
+@Route(path = "/server-owned")
+@DomMode(JrxDomMode.SERVER_OWNED)
+@Stateless
+public class ServerOwnedTestPage extends AppPage {
+    // No server memory — state travels in the signed token
+    @State public int counter = 0;
+    @State public List<String> logs = new ArrayList<>();
+    ...
+}
+```
+
+Token expiry is 2 hours (`_exp = System.currentTimeMillis() + 7200000`). Expired tokens return an empty map and the component resets to its initial state.
+
+The secret key used to sign tokens is read from the `JRX_SECRET` environment variable. If not set, a random UUID is used (tokens are invalidated on server restart).
+
+**When to use:** Public, read-heavy pages with infrequent user interactions. Zero memory footprint per user. Scales horizontally without shared session storage.
+
+<Warning>
+  `@Stateless` tokens are signed but not encrypted. Do not store sensitive data (passwords, PII) in `@State` fields on a `@Stateless` component.
+</Warning>
+
+## Combining modes
+
+Modes can be combined on the same component. The most common pairing is `@Client @StatefulRam`:
+
+```java
+@Route(path = "/clients")
+@Client        // CSR: APT-generated JS template, JSON-only updates
+@StatefulRam   // State stays in JVM Caffeine cache, never serialized to Redis
+public class ClientsPage extends AppPage {
+    @State public List<Client_> clients = new ArrayList<>();
+    @State public boolean isModalOpen = false;
+    ...
+}
+```
+
+Another valid combination is `@DomMode(SERVER_OWNED) @Stateless` (as shown in `ServerOwnedTestPage`): the server evaluates all conditionals and loops, and state travels in a signed token — no server memory at all, and no client-side template engine.

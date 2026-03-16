@@ -1,0 +1,140 @@
+---
+title: "@State"
+description: "Marks a field as reactive server state. Changes to @State fields trigger automatic WebSocket delta pushes to connected browsers."
+---
+
+`@State` marks a field in an `HtmlComponent` subclass as part of the component's reactive state. The JReactive runtime tracks these fields across `@Call` invocations and automatically pushes changed values to connected browsers as WebSocket deltas.
+
+**Package:** `com.ciro.jreactive`
+
+**Target:** `FIELD`
+
+**Retention:** `RUNTIME`
+
+## Annotation elements
+
+<ParamField body="value" type="String" default='""'>
+  Logical name exposed to the template engine. When empty (the default), the Java field name is used. Useful when you want to expose a field under a different name in the template.
+</ParamField>
+
+## Behavior
+
+When you annotate a field with `@State`, JReactive:
+
+1. **Wraps smart collections automatically.** If the field type is `List`, `Set`, or `Map`, JReactive replaces the initial value with a `SmartList`, `SmartSet`, or `SmartMap` respectively. These wrappers intercept mutations (`add`, `remove`, `set`, `clear`) and record structural deltas instead of re-sending the whole collection.
+
+2. **Captures a snapshot before each `@Call`.** Before executing the method body, the runtime records the current value of every `@State` field via `_captureStateSnapshot()`.
+
+3. **Computes a diff after each `@Call`.** After the method body returns, `_syncState()` compares the current values against the snapshot. Only fields whose values changed are included in the WebSocket delta batch sent to the browser.
+
+4. **Exposes fields to the template.** The field name (or the `value` alias) becomes available inside `template()` as `{{fieldName}}` and in directives such as `data-if`, `{{#each}}`, and `name` bindings.
+
+<Note>
+  `@State` does **not** persist state across server restarts. Use `@Stateful` (Redis) or `@StatefulRam` (Caffeine) at the class level to control where component state is stored between requests.
+</Note>
+
+## Difference from `@Bind`
+
+| | `@State` | `@Bind` |
+|---|---|---|
+| Purpose | Component's own mutable state | Bindable property supplied by a parent component |
+| Written by | The component itself (inside `@Call` methods) | The parent component (via `:prop="expression"` in the parent template) |
+| Delta push | Yes — changes propagate to browser automatically | Only when the parent re-renders and passes a new value |
+| Read-only flag | No | Yes (`readOnly = true`) |
+
+## Examples
+
+### Primitive and string state
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/counter")
+@StatefulRam
+public class CounterPage extends HtmlComponent {
+
+    @State
+    public int count = 0;
+
+    @State
+    public String label = "Click me";
+
+    @Call
+    public void increment() {
+        count++;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <p>Count: <strong>{{count}}</strong></p>
+                <button @click="increment()">{{label}}</button>
+            </div>
+            """;
+    }
+}
+```
+
+### POJO state
+
+When the `@State` field is a POJO, mutating nested fields requires an explicit `updateState()` call:
+
+```java
+public static class PageState {
+    public String message;
+}
+
+@State
+PageState state = new PageState();
+
+@Call
+public void submit(String msg) {
+    state.message = msg;     // nested mutation
+    updateState("state");    // explicitly push to browser
+}
+```
+
+### Collection state (SmartList)
+
+Collections declared as `@State` fields are automatically wrapped in smart collection types. Mutations send structural deltas, not full snapshots:
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+
+@State
+public List<String> items = new ArrayList<>();
+
+@Call
+public void addItem(String value) {
+    items.add(value);  // sends delta: { "op": "ADD", "index": N, "item": value }
+}
+
+@Call
+public void removeFirst() {
+    items.remove(0);   // sends delta: { "op": "REMOVE", "index": 0 }
+}
+```
+
+### Custom logical name
+
+```java
+@State("userName")
+private String internalFullName = "";
+```
+
+The template can reference this field as `{{userName}}`.
+
+## Related
+
+- [`@Bind`](/api/annotations/bind) — bindable property passed from a parent component
+- [`@Call`](/api/annotations/call) — marks a method as browser-callable; triggers delta computation after execution
+- [`@StatefulRam`](/api/annotations/statefulram) — stores component state in Caffeine (default)
+- [`@Stateful`](/api/annotations/stateful) — stores component state in Redis
+- [`@Stateless`](/api/annotations/stateless) — encodes state in a signed token sent to the client
+- [`SmartList`](/api/smart-list) — auto-wrapping list that records structural deltas

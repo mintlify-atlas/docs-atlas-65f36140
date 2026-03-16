@@ -1,0 +1,185 @@
+---
+title: "Routing"
+description: "Map URL paths to HtmlComponent classes using @Route, inject path and query parameters with @Param and @UrlParam, and wrap pages in layouts with @Layout."
+---
+
+JReactive's router maps URL paths to `HtmlComponent` classes. You annotate a component class with `@Route(path = "/...")` and the framework resolves it at request time. No XML, no controller boilerplate.
+
+## `@Route`
+
+```java
+@Route(path = "/")                          // matches exactly /
+@Route(path = "/users/{id}")               // matches /users/42, /users/admin, etc.
+@Route(path = "/store-test")               // static path
+```
+
+`@Route` is a class-level annotation in `com.ciro.jreactive.router`. The `path` attribute is required and must start with `/`.
+
+```java
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/users/{id}")
+public class UserPage extends AppPage {
+    ...
+}
+```
+
+## Path parameters with `@Param`
+
+Path segments enclosed in `{braces}` become named parameters. Annotate a field (or method parameter) with `@Param("name")` to have JReactive inject the captured segment:
+
+```java
+import com.ciro.jreactive.router.Param;
+
+@Route(path = "/users/{id}")
+public class UserPage extends AppPage {
+
+    @Param("id")
+    @Bind String userId;
+
+    @Bind public Type<String> name = $("");
+
+    @Override
+    protected void onInit() {
+        // userId is already populated when onInit() runs
+        if ("10".equals(userId)) {
+            name.set("Ciro (Admin)");
+        } else {
+            name.set("Visitor " + userId);
+        }
+    }
+
+    @Override
+    protected String template() {
+        return """
+          <div>
+            <h2>User {{name}}</h2>
+            <p>ID: {{userId}}</p>
+          </div>
+        """;
+    }
+}
+```
+
+`@Param` supports `String`, `int`/`Integer`, `long`/`Long`, and `boolean`/`Boolean` fields. It also works on `ReactiveVar<T>` and `Type<T>` fields — the raw string is passed to `set()`.
+
+## Query string parameters with `@UrlParam`
+
+Annotate a field with `@UrlParam("name")` to bind a query string parameter. If the `value` attribute is empty, the field name is used:
+
+```java
+import com.ciro.jreactive.router.UrlParam;
+
+@Route(path = "/search")
+public class SearchPage extends AppPage {
+
+    @UrlParam("q")
+    @State
+    public String query = "";
+
+    @UrlParam  // binds ?page= because value defaults to field name
+    @State
+    public int page = 1;
+
+    @Override
+    protected void onInit() {
+        // query and page are populated from the URL before onInit() runs
+    }
+}
+```
+
+`@UrlParam` fields are also exposed to the browser as `window.__JRX_URL_PARAMS__` so the SPA router can re-inject them on client-side navigation.
+
+## Layouts with `@Layout`
+
+A layout wraps a page component inside an outer HTML shell. Annotate a page class (or a shared base class) with `@Layout(LayoutClass.class)`:
+
+```java
+import com.ciro.jreactive.router.Layout;
+
+// Shared base — all pages that extend AppPage get MainLayout automatically
+@Layout(MainLayout.class)
+public abstract class AppPage extends HtmlComponent {
+}
+```
+
+The `@Layout` annotation is `@Inherited`, so subclasses pick it up automatically. `MainLayout` itself must have a `<slot />` tag where the page content is injected:
+
+```java
+public class MainLayout extends HtmlComponent {
+
+    @Override
+    protected String template() {
+        return """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <title>JReactive App</title>
+            </head>
+            <body>
+                <nav>
+                    <a href="/" data-router>Home</a>
+                    <a href="/users/10" data-router>Profile</a>
+                </nav>
+
+                <main id="app">
+                    <slot />
+                </main>
+
+                <script src="/js/idiomorph.min.js"></script>
+                <script src="/js/sockjs.min.js"></script>
+                <script src="/js/jreactive-runtime.js"></script>
+            </body>
+            </html>
+        """;
+    }
+}
+```
+
+On a full page load, `JrxHttpApi.render()` instantiates the layout, injects the rendered page into the default slot, and returns the combined HTML. On SPA navigation (partial requests), only the page HTML is returned.
+
+## `PathPattern` compilation
+
+`PathPattern.compile(template)` converts a route path template into a regex and a list of parameter names. The pattern `/users/{id}/orders/{oid}` compiles to `^/users/([^/]+)/orders/([^/]+)$` with names `["id", "oid"]`.
+
+```java
+PathPattern p = PathPattern.compile("/users/{id}");
+Map<String, String> params = p.match("/users/42");  // {"id": "42"}
+Map<String, String> none   = p.match("/products");  // null (no match)
+```
+
+The `RouteRegistry` compiles all `@Route` patterns at startup and selects the first matching one at request time.
+
+## `RouteProvider` SPI
+
+If the default annotation-based discovery is not sufficient — for example, to load routes from a database or add routes programmatically — you can implement the `RouteProvider` SPI:
+
+```java
+public interface RouteProvider {
+    Result resolve(String path);
+    record Result(HtmlComponent component, Map<String, String> params) {}
+}
+```
+
+Return a `Result` with the resolved component instance and any extracted path parameters, or `null` if the provider cannot match the path. Register your implementation as a Spring bean and JReactive will call it before falling back to the annotation-based registry.
+
+## SPA navigation
+
+Mark anchor tags with `data-router` to opt into client-side navigation:
+
+```html
+<a href="/" data-router>Home</a>
+<a href="/users/10" data-router>Profile</a>
+<a href="/signup" data-router>Sign up</a>
+```
+
+When a `data-router` link is clicked:
+
+1. The JReactive JS runtime cancels the default browser navigation.
+2. It sends an AJAX request to the new path with a `partial=true` header.
+3. The server renders the new page component (without the layout shell) and returns the HTML.
+4. The runtime morphs the `<main id="app">` element using Idiomorph.
+5. The browser URL updates via `history.pushState`.
+
+The WebSocket connection stays open across SPA navigations; JReactive re-subscribes to the new page's bindings.

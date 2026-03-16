@@ -1,0 +1,123 @@
+---
+title: "JCheckBox"
+description: "A labeled checkbox component with two-way binding, required indicator, and change callback."
+---
+
+`JCheckBox` renders a `<div class="jrx-field jrx-checkbox">` wrapper containing a checkbox `<input>` paired with a `<label>`. Like `JInput`, the `name` attribute is set from the `field` property so its value is included when a surrounding `JForm` is submitted.
+
+## Properties
+
+<ParamField path="field" type="String" default="">
+  The `name` attribute on the underlying `<input type="checkbox">`. Use dot-notation to bind to a nested object field, e.g. `"form.acceptTerms"`.
+</ParamField>
+
+<ParamField path="label" type="String" default="">
+  The visible label text rendered next to the checkbox.
+</ParamField>
+
+<ParamField path="required" type="boolean" default="false">
+  When `true`, appends a red asterisk to the label.
+</ParamField>
+
+<ParamField path="disabled" type="boolean" default="false">
+  When `true`, renders the checkbox as disabled.
+</ParamField>
+
+<ParamField path="checked" type="boolean" default="false">
+  Controls whether the checkbox appears checked. Bind this to a `@State` boolean to reflect server-side state.
+</ParamField>
+
+<ParamField path="helpText" type="String" default="">
+  Secondary text rendered below the checkbox in a `<small>` element.
+</ParamField>
+
+<ParamField path="onChange" type="String" default="">
+  The `@Call` expression invoked when the checkbox is toggled.
+</ParamField>
+
+## Usage example
+
+```html template
+<!-- Simple agreement checkbox -->
+<JCheckBox
+    label="I agree to the terms and conditions"
+    field="form.acceptTerms"
+    required="true"
+/>
+
+<!-- Checkbox with help text and onChange callback -->
+<JCheckBox
+    label="Subscribe to newsletter"
+    field="form.newsletter"
+    helpText="You can unsubscribe at any time."
+    onChange="onNewsletterChange()"
+/>
+
+<!-- Controlled checked state from server -->
+<JCheckBox
+    label="Enable notifications"
+    field="form.notifications"
+    :checked="notificationsEnabled"
+    onChange="toggleNotifications()"
+/>
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+import java.io.Serializable;
+
+@Route(path = "/profile")
+public class ProfilePage extends AppPage {
+
+    public static class ProfileForm implements Serializable {
+        public boolean acceptTerms;
+        public boolean newsletter;
+    }
+
+    @State public ProfileForm form = new ProfileForm();
+    @State public boolean notificationsEnabled = false;
+
+    @Call
+    public void toggleNotifications() {
+        this.notificationsEnabled = !this.notificationsEnabled;
+    }
+
+    @Call
+    public void submit(ProfileForm form) {
+        // form.acceptTerms and form.newsletter are populated from the checkboxes
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <JForm onSubmit="submit(form)">
+                <JCheckBox
+                    label="Accept terms and conditions"
+                    field="form.acceptTerms"
+                    required="true"
+                />
+                <JCheckBox
+                    label="Subscribe to newsletter"
+                    field="form.newsletter"
+                    helpText="Receive weekly product updates."
+                />
+                <JCheckBox
+                    label="Enable notifications"
+                    field="form.notifications"
+                    :checked="notificationsEnabled"
+                    onChange="toggleNotifications()"
+                />
+            </JForm>
+        """;
+    }
+}
+```
+
+<Note>
+  The `checked` property controls the visual state of the checkbox in the rendered HTML. For two-way form submission, ensure the `field` name matches the property on your form DTO.
+</Note>

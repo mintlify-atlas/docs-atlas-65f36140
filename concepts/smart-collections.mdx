@@ -1,0 +1,185 @@
+---
+title: "Smart collections"
+description: "SmartList, SmartSet, and SmartMap fire fine-grained structural change events so JReactive sends minimal deltas instead of full collection snapshots."
+---
+
+When a `@State` field holds a `List`, `Set`, or `Map`, JReactive automatically wraps it in a smart collection at binding time. Smart collections extend their standard Java counterparts and fire change events on every structural mutation. The runtime picks up those events and pushes precise wire-protocol deltas to the browser — no full collection snapshot needed.
+
+## The three smart collections
+
+| Class | Extends | Change record fields |
+|---|---|---|
+| `SmartList<E>` | `ArrayList<E>` | `op`, `index`, `item` |
+| `SmartSet<E>` | `HashSet<E>` | `op`, `item` |
+| `SmartMap<K,V>` | `HashMap<K,V>` | `op`, `key`, `value` |
+
+All three live in `com.ciro.jreactive.smart`.
+
+## `SmartList<E>`
+
+`SmartList` fires a `Change` record on every structural operation:
+
+| Operation | `op` value | `index` | `item` |
+|---|---|---|---|
+| `add(e)` | `"ADD"` | appended index | new element |
+| `add(i, e)` | `"ADD"` | insertion index | new element |
+| `remove(i)` | `"REMOVE"` | removed index | `null` |
+| `remove(o)` | `"REMOVE"` | former index | `null` |
+| `set(i, e)` | `"SET"` | affected index | new element |
+| `clear()` | `"CLEAR"` | `0` | `null` |
+
+```java
+public class HelloLeaf extends HtmlComponent {
+
+    @State
+    public List<String> fruits = new ArrayList<>();  // auto-wrapped as SmartList
+
+    @State
+    public String newFruit = "";
+
+    @Call
+    public void addFruit(String fruta) {
+        if (fruta == null || fruta.isBlank()) return;
+        fruits.add(fruta);   // fires ADD event → WebSocket delta
+        newFruit = "";
+    }
+
+    @Override
+    protected String template() {
+        return """
+          <div>
+            <ul>
+              {{#each fruits as fruit}}
+                <li>{{fruit}}</li>
+              {{/each}}
+            </ul>
+            <input name="newFruit" placeholder="New fruit">
+            <button @click="addFruit(newFruit)">Add</button>
+          </div>
+          """;
+    }
+}
+```
+
+You can also subscribe directly in Java:
+
+```java
+// Subscribing to a SmartList directly
+SmartList<String> list = new SmartList<>();
+list.subscribe(change -> {
+    System.out.println("op=" + change.op() + " index=" + change.index() + " item=" + change.item());
+});
+list.add("apple");   // prints: op=ADD index=0 item=apple
+```
+
+## `SmartSet<E>`
+
+`SmartSet` fires `ADD` or `REMOVE` on `add()` and `remove()`, and `CLEAR` on `clear()`. It also provides an `update(E element)` method that re-fires the element as `REMOVE` then `ADD` — useful when an element's content changes in-place and you want to notify listeners without removing and re-adding it in Java:
+
+```java
+public record Change(String op, Object item) {}
+
+// update() signals that an element has mutated without removing it from the set
+set.update(existingElement);  // fires: REMOVE existingElement, ADD existingElement
+```
+
+## `SmartMap<K,V>`
+
+`SmartMap` fires `PUT` on both `put()` and `putAll()`, `REMOVE` on `remove()`, and `CLEAR` on `clear()`. Like `SmartSet`, it exposes an `update(K key)` helper that re-fires the current value:
+
+```java
+public record Change(String op, Object key, Object value) {}
+
+map.put("theme", "dark");    // fires: PUT key=theme value=dark
+map.remove("theme");         // fires: REMOVE key=theme value=null
+map.update("theme");         // fires: PUT key=theme value=<current value>
+```
+
+## Auto-wrapping via `@State`
+
+You never need to instantiate smart collections yourself. Declare a plain `List`, `Set`, or `Map` field with `@State` and JReactive wraps it at binding time:
+
+```java
+@State
+public List<String> items = new ArrayList<>();   // becomes SmartList at runtime
+
+@State
+public List<MarkerData> markers = new ArrayList<>(List.of(
+    new MarkerData(4.6097, -74.0817, "Bogotá"),
+    new MarkerData(6.2442, -75.5812, "Medellín")
+));  // elements can be any Serializable POJO
+```
+
+If you replace the field with a new list instance from a `@Call` method, `_syncState()` detects the change by identity and wraps the new value too.
+
+## Wire protocol delta format
+
+When a smart collection fires a change event, the runtime serializes it into a compact JSON delta and sends it in the WebSocket batch. The shape mirrors the `Change` record:
+
+```json
+// SmartList ADD
+{ "k": "fruits", "v": { "op": "ADD", "index": 2, "item": "mango" } }
+
+// SmartList REMOVE
+{ "k": "fruits", "v": { "op": "REMOVE", "index": 1, "item": null } }
+
+// SmartList CLEAR
+{ "k": "fruits", "v": { "op": "CLEAR", "index": 0, "item": null } }
+
+// SmartMap PUT
+{ "k": "store.ui", "v": { "op": "PUT", "key": "theme", "value": "dark" } }
+```
+
+The browser runtime applies these deltas against the local JS model without touching unchanged elements in the DOM.
+
+## Practical example: CRUD list
+
+```java
+@Route(path = "/newStateTest")
+public class NewStateTestPage extends AppPage {
+
+    @State
+    public String newItem = "";
+
+    @State
+    public List<String> items = new ArrayList<>();
+
+    @Override
+    public void onInit() {
+        items.add("pera");
+        items.add("coca cola");
+    }
+
+    @Call
+    public void addItem(String value) {
+        items.add(value);   // SmartList fires ADD → delta pushed
+        newItem = "";
+    }
+
+    @Call
+    public void resetList() {
+        items.clear();      // SmartList fires CLEAR → delta pushed
+    }
+
+    @Override
+    protected String template() {
+        return """
+        <fieldset>
+          <legend>Items ({{items.size}})</legend>
+          <input name="newItem" placeholder="New item">
+          <button @click="addItem(newItem)">Add</button>
+          <button @click="resetList()">Clear</button>
+          <ul>
+            {{#each items as it}}
+              <li>{{it}}</li>
+            {{/each}}
+          </ul>
+        </fieldset>
+        """;
+    }
+}
+```
+
+<Warning>
+  Smart collections track changes **by mutation**, not by assignment. If you replace the field value with `items = newList` inside a `@Call`, `_syncState()` detects the identity change and sends the full list as a new value. To benefit from fine-grained deltas, always mutate the existing collection (`items.add()`, `items.remove()`, etc.) rather than replacing it.
+</Warning>

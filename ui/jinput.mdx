@@ -1,0 +1,159 @@
+---
+title: "JInput"
+description: "A labeled text input component with help text, validation indicator, and event callbacks."
+---
+
+`JInput` renders a styled `<div class="jrx-field">` wrapper containing a `<label>` and an `<input>`. It handles the standard label/input pairing, an optional required asterisk, and an optional help text line below the field. The `name` attribute on the underlying `<input>` is set to the value of the `field` property, enabling automatic form data collection in `@Call` methods.
+
+## Properties
+
+<ParamField path="field" type="String" default="">
+  The `name` attribute of the underlying `<input>`. Use dot-notation to bind the input to a nested object field, e.g. `"form.email"`. JReactive collects all `name`-bound inputs and assembles them into typed method arguments.
+</ParamField>
+
+<ParamField path="label" type="String" default="">
+  The visible label text rendered above the input.
+</ParamField>
+
+<ParamField path="type" type="String" default="text">
+  The HTML input type: `text`, `email`, `password`, `number`, `tel`, etc.
+</ParamField>
+
+<ParamField path="placeholder" type="String" default="">
+  Placeholder text shown inside the input when it is empty.
+</ParamField>
+
+<ParamField path="required" type="boolean" default="false">
+  When `true`, a red asterisk (`*`) is appended to the label text.
+</ParamField>
+
+<ParamField path="disabled" type="boolean" default="false">
+  When `true`, the input is rendered as disabled.
+</ParamField>
+
+<ParamField path="helpText" type="String" default="">
+  Secondary text rendered below the input in a `<small>` element. Use for hints or error messages.
+</ParamField>
+
+<ParamField path="autocomplete" type="String" default="">
+  The HTML `autocomplete` attribute value, e.g. `"email"`, `"new-password"`, `"off"`.
+</ParamField>
+
+<ParamField path="onInput" type="String" default="">
+  The `@Call` expression invoked on every keystroke (`input` event), e.g. `"validate(form)"`.
+</ParamField>
+
+<ParamField path="onChange" type="String" default="">
+  The `@Call` expression invoked when the input loses focus with a changed value (`change` event).
+</ParamField>
+
+## Usage example
+
+```html template
+<!-- Basic labeled input -->
+<JInput label="Full name" field="form.name" required="true" />
+
+<!-- Email with help text -->
+<JInput
+    label="Email address"
+    type="email"
+    field="form.email"
+    placeholder="you@example.com"
+    autocomplete="email"
+    required="true"
+    helpText="We'll never share your email."
+/>
+
+<!-- Password with onChange callback -->
+<JInput
+    label="Password"
+    type="password"
+    field="form.password"
+    required="true"
+    onChange="checkStrength(form)"
+/>
+```
+
+## Java setup
+
+Use dot-notation field names to bind inputs to a form DTO. The DTO is automatically deserialized from the `name` attributes when the `@Call` method is invoked:
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+import jakarta.validation.Valid;
+import java.io.Serializable;
+
+@Route(path = "/signup")
+public class SignupPage extends AppPage {
+
+    public static class SignupForm implements Serializable {
+        public String name;
+        public String email;
+        public String password;
+    }
+
+    @State SignupForm form = new SignupForm();
+
+    @Call
+    public void register(@Valid SignupForm form) {
+        // form.name, form.email, form.password are populated from the inputs
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <JForm onSubmit="register(form)">
+                <JInput label="Name" field="form.name" required="true" />
+                <JInput label="Email" type="email" field="form.email" required="true" />
+                <JInput label="Password" type="password" field="form.password" required="true" />
+            </JForm>
+        """;
+    }
+}
+```
+
+## Form binding with name= pattern
+
+The `field` property becomes the `name` attribute on the underlying `<input>`. JReactive scans all named inputs inside a form submission and maps them to method parameters:
+
+```html template
+<!-- name="form.email" tells JReactive to set form.email from this input -->
+<JInput label="Email" field="form.email" type="email" />
+```
+
+You can also use a plain `<input>` element directly when you need more control:
+
+```html template
+<input type="hidden" name="form.id" value="{{form.id}}">
+```
+
+## Real-world example
+
+From `ClientsPage` — inputs inside a modal form that maps to a `Client_` object:
+
+```html template
+<JInput
+    label="Nombre Completo"
+    :field="form.name"
+    required="true"
+/>
+
+<JInput
+    label="Correo Electrónico"
+    type="email"
+    :field="form.email"
+    required="true"
+/>
+```
+
+```java
+@Call
+public void save(Client_ form) {
+    service.save(form);
+    this.clients = service.findAll();
+    this.isModalOpen = false;
+}
+```

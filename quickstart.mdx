@@ -1,80 +1,343 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Build your first JReactive component in under five minutes"
 ---
 
-## Get started in three steps
+This guide walks you through creating a Spring Boot application with a live-updating counter component. By the end, you will have a working JReactive app running locally.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  JReactive is distributed through [JitPack](https://jitpack.io). You need a JitPack repository entry in your build file. All artifacts are under the `com.ciro` group ID at version `0.0.1-SNAPSHOT`.
+</Note>
 
-### Step 1: Set up your local environment
+<Steps>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Add the JitPack repository">
 
-### Step 2: Deploy your changes
+Add the JitPack repository to your Maven `pom.xml` so Maven can resolve JReactive artifacts:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```xml pom.xml
+<repositories>
+  <repository>
+    <id>jitpack.io</id>
+    <url>https://jitpack.io</url>
+  </repository>
+</repositories>
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+</Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Add dependencies">
 
-### Step 3: Go live
+Add the following dependencies. `jreactive-starter-spring` pulls in Spring Boot web and WebSocket support. `jreactive-apt` runs at compile time only. `jreactive-runtime-js` provides the browser-side JavaScript runtime. `jreactive-ui` is optional but includes ready-made components.
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<CodeGroup>
+
+```xml Maven
+<properties>
+  <java.version>21</java.version>
+  <spring-boot.version>3.2.5</spring-boot.version>
+  <jreactive.version>0.0.1-SNAPSHOT</jreactive.version>
+</properties>
+
+<dependencies>
+  <!-- Spring Boot auto-configuration + WebSocket -->
+  <dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-starter-spring</artifactId>
+    <version>${jreactive.version}</version>
+  </dependency>
+
+  <!-- JVM runtime: protocol handler, HTTP API, page resolver -->
+  <dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-runtime-jvm</artifactId>
+    <version>${jreactive.version}</version>
+  </dependency>
+
+  <!-- Browser-side JS runtime (SockJS, Idiomorph, jreactive-runtime.js) -->
+  <dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-runtime-js</artifactId>
+    <version>${jreactive.version}</version>
+  </dependency>
+
+  <!-- Optional: built-in UI components (JButton, JInput, JTable, etc.) -->
+  <dependency>
+    <groupId>com.ciro</groupId>
+    <artifactId>jreactive-ui</artifactId>
+    <version>${jreactive.version}</version>
+  </dependency>
+</dependencies>
+```
+
+```groovy Gradle
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'com.ciro:jreactive-starter-spring:0.0.1-SNAPSHOT'
+    implementation 'com.ciro:jreactive-runtime-jvm:0.0.1-SNAPSHOT'
+    implementation 'com.ciro:jreactive-runtime-js:0.0.1-SNAPSHOT'
+    implementation 'com.ciro:jreactive-ui:0.0.1-SNAPSHOT'
+}
+```
+
+</CodeGroup>
+
+</Step>
+
+<Step title="Configure the annotation processor">
+
+`jreactive-apt` is the AOT annotation processor. It runs during `mvn compile` and generates zero-reflection accessor classes, pre-compiles client-side JS templates, and applies scoped CSS. Configure it in `maven-compiler-plugin`:
+
+```xml pom.xml
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-compiler-plugin</artifactId>
+      <configuration>
+        <source>21</source>
+        <target>21</target>
+        <annotationProcessorPaths>
+          <path>
+            <groupId>com.ciro</groupId>
+            <artifactId>jreactive-apt</artifactId>
+            <version>${jreactive.version}</version>
+          </path>
+        </annotationProcessorPaths>
+        <fork>true</fork>
+        <compilerArgs>
+          <arg>--add-exports</arg>
+          <arg>jdk.compiler/com.sun.source.util=ALL-UNNAMED</arg>
+          <arg>--add-exports</arg>
+          <arg>jdk.compiler/com.sun.source.tree=ALL-UNNAMED</arg>
+          <!-- Required for @Param injection by parameter name -->
+          <arg>-parameters</arg>
+        </compilerArgs>
+      </configuration>
+    </plugin>
+
+    <plugin>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-maven-plugin</artifactId>
+      <version>${spring-boot.version}</version>
+      <executions>
+        <execution>
+          <goals><goal>repackage</goal></goals>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+```
+
+<Tip>
+  Add `build-helper-maven-plugin` to include the generated sources directory so your IDE picks up accessor classes:
+
+  ```xml
+  <plugin>
+    <groupId>org.codehaus.mojo</groupId>
+    <artifactId>build-helper-maven-plugin</artifactId>
+    <version>3.4.0</version>
+    <executions>
+      <execution>
+        <id>add-source</id>
+        <phase>generate-sources</phase>
+        <goals><goal>add-source</goal></goals>
+        <configuration>
+          <sources>
+            <source>${project.build.directory}/generated-sources/annotations</source>
+          </sources>
+        </configuration>
+      </execution>
+    </executions>
+  </plugin>
+  ```
+</Tip>
+
+</Step>
+
+<Step title="Create the Spring Boot main class">
+
+A standard `@SpringBootApplication` entry point. JReactive's auto-configuration (`JReactiveAutoConfiguration`) discovers and wires everything automatically.
+
+```java src/main/java/com/example/myapp/MyApplication.java
+package com.example.myapp;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class MyApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(MyApplication.class, args);
+    }
+}
+```
+
+</Step>
+
+<Step title="Create a layout">
+
+A layout wraps every page. It provides the full HTML shell, navigation, and the three required script tags. Place a `<slot />` element where the page content should appear.
+
+```java src/main/java/com/example/myapp/MainLayout.java
+package com.example.myapp;
+
+import com.ciro.jreactive.HtmlComponent;
+
+public class MainLayout extends HtmlComponent {
+
+    @Override
+    protected String template() {
+        return """
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>My JReactive App</title>
+            </head>
+            <body>
+                <nav>
+                    <strong>My App</strong>
+                    <a href="/" data-router>Home</a>
+                </nav>
+
+                <main>
+                    <slot />
+                </main>
+
+                <!-- Required: Idiomorph DOM morphing, SockJS transport, JReactive runtime -->
+                <script src="/js/idiomorph.min.js"></script>
+                <script src="/js/sockjs.min.js"></script>
+                <script src="/js/jreactive-runtime.js"></script>
+            </body>
+            </html>
+        """;
+    }
+}
+```
+
+<Note>
+  The three `<script>` tags at the bottom of `<body>` are required. `idiomorph.min.js` performs DOM morphing, `sockjs.min.js` provides the WebSocket transport, and `jreactive-runtime.js` is the JReactive client runtime. All three are served automatically from `jreactive-runtime-js`.
+</Note>
+
+</Step>
+
+<Step title="Create a base page class">
+
+Create an abstract base that applies the layout to all pages using `@Layout`. Pages that extend this class automatically render inside `MainLayout`.
+
+```java src/main/java/com/example/myapp/AppPage.java
+package com.example.myapp;
+
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.router.Layout;
+
+@Layout(MainLayout.class)
+public abstract class AppPage extends HtmlComponent {
+    // Shared state or utility methods for all pages go here
+}
+```
+
+</Step>
+
+<Step title="Create a counter component">
+
+This is the core JReactive pattern. Extend `HtmlComponent`, declare reactive fields with `@State`, and mark event handler methods with `@Call`. The `template()` method returns HTML with `{{variable}}` mustache bindings and `@click` event directives.
+
+```java src/main/java/com/example/myapp/CounterPage.java
+package com.example.myapp;
+
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/")
+@StatefulRam
+public class CounterPage extends AppPage {
+
+    @State
+    public int count = 0;
+
+    @Call
+    public void increment() {
+        count++;
+    }
+
+    @Call
+    public void reset() {
+        count = 0;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h1>Counter</h1>
+                <p>Current value: <strong>{{count}}</strong></p>
+                <button @click="increment()">Increment</button>
+                <button @click="reset()">Reset</button>
+            </div>
+        """;
+    }
+}
+```
+
+**What each annotation does:**
+
+| Annotation | Location | Purpose |
+|---|---|---|
+| `@Route(path = "/")` | Class | Registers this component as the handler for the `/` URL |
+| `@StatefulRam` | Class | Keeps component state in JVM memory (Caffeine cache); never serialized to Redis |
+| `@State` | Field | Marks `count` as reactive; changes are automatically detected and pushed to the browser |
+| `@Call` | Method | Exposes `increment()` and `reset()` as callable endpoints; invoked via `POST /call/{componentId.methodName}` |
+
+<Warning>
+  Every JReactive application must have exactly one `@Route(path = "/")` component. The `RouteRegistry` will throw an `IllegalStateException` at startup if no root route is registered.
+</Warning>
+
+</Step>
+
+<Step title="Run the application">
+
+```bash
+mvn spring-boot:run
+```
+
+Open [http://localhost:8080](http://localhost:8080) in your browser. You should see the counter page. Clicking **Increment** updates the count in real time over WebSocket — no page reload, no JavaScript written by you.
+
+**What happens on first load:**
+
+1. Spring Boot handles the HTTP request and renders `CounterPage` inside `MainLayout`.
+2. The browser receives the full HTML snapshot including the current `count` value.
+3. The JReactive JS runtime opens a WebSocket connection and subscribes to binding updates.
+4. When you click **Increment**, the browser posts to `/call/CounterPage-1.increment` (or just `increment` for the root component).
+5. `JrxHttpApi` invokes `increment()`, the `count` field changes, and the updated value is pushed back over WebSocket.
+6. The runtime applies the delta using Idiomorph DOM morphing.
+
+</Step>
+
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="How it works" icon="gear" href="/how-it-works">
+    Understand the server-driven rendering model, WebSocket protocol, and AOT compilation pipeline.
+  </Card>
+  <Card title="Core concepts" icon="book" href="/concepts/components">
+    Deep-dive into components, reactive state, templates, and routing.
+  </Card>
+  <Card title="Spring Boot integration" icon="leaf" href="/guides/spring-boot-integration">
+    Inject Spring beans into components, configure the state store, and customize auto-configuration.
+  </Card>
+  <Card title="Forms and validation" icon="check-circle" href="/guides/forms-and-validation">
+    Use Bean Validation annotations with `@Call` parameters and `@Valid` DTOs.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

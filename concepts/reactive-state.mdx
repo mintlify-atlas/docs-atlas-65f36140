@@ -1,0 +1,159 @@
+---
+title: "Reactive state"
+description: "How ReactiveVar<T> and Type<T> work, how @State fields are auto-tracked, and how changes propagate to the browser over WebSocket."
+---
+
+JReactive's reactivity model is built on two classes: `ReactiveVar<T>` and its ergonomic wrapper `Type<T>`. Every `@State` field in your component is backed by a `ReactiveVar` at runtime, and every mutation fires a change event that the runtime picks up and pushes to the connected browser.
+
+## `ReactiveVar<T>`
+
+`ReactiveVar<T>` is a thread-safe observable value container in `com.ciro.jreactive`:
+
+```java
+public final class ReactiveVar<T> implements java.io.Serializable {
+
+    public ReactiveVar(T initial) { ... }
+
+    public T get() { ... }
+
+    public void set(T newValue) { ... }          // fires all registered listeners
+
+    public Runnable onChange(Consumer<T> listener) { ... }  // returns unsubscribe handle
+
+    public void clearListeners() { ... }          // called automatically on onUnmount()
+}
+```
+
+Calling `set()` stores the new value and invokes every registered `Consumer<T>` listener — **unless** the component's `activeGuard` returns `false` (i.e., the component is not mounted). This guard prevents spurious updates from background threads after a session ends.
+
+## `Type<T>` — ergonomic shorthand
+
+`Type<T>` is a thin `record` wrapper around `ReactiveVar<T>`. It is the recommended way to declare reactive fields with an inline initial value:
+
+```java
+import static com.ciro.jreactive.Type.$;
+
+// Equivalent forms:
+Type<String> clock = Type.of("--:--:--");   // static factory
+Type<String> clock = $("--:--:--");          // shorthand alias of Type.of()
+
+// Usage
+clock.get();              // reads current value
+clock.set("12:00:00");    // writes + fires listeners
+clock.rx();               // access the underlying ReactiveVar<T>
+```
+
+Because `Type<T>` wraps a `ReactiveVar`, you can call `set()` from `onMount()` timers or any server-side thread and JReactive will push the new value to the browser automatically.
+
+```java
+public class ClockLeaf extends HtmlComponent {
+
+    @Bind public Type<String> clock = $("--:--:--");
+
+    @Override
+    protected void onMount() {
+        Timer timer = new Timer(true);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override public void run() {
+                // Calling set() here triggers a WebSocket push
+                clock.set(LocalTime.now().withNano(0).toString());
+            }
+        }, 1000, 1000);
+    }
+}
+```
+
+## How `@State` fields are automatically wrapped
+
+When JReactive builds the binding map for a component (on first render), it scans every `@State`-annotated field via reflection and wraps the raw value in a `ReactiveVar`. For collection fields it goes one step further:
+
+| Field type | Wrapped as |
+|---|---|
+| `List<E>` | `SmartList<E>` |
+| `Set<E>` | `SmartSet<E>` |
+| `Map<K,V>` | `SmartMap<K,V>` |
+| Primitive, `String`, `Number`, POJO | `ReactiveVar<T>` directly |
+
+The `ReactiveVar` created for a `@State` field is wired with an `onChange` listener that writes the new value back to the field via reflection. This means you can read and write the field normally in your Java code:
+
+```java
+@State
+public int count = 0;
+
+@Call
+public void increment() {
+    count++;   // plain Java assignment
+    // JReactive detects the change via _syncState() after the @Call returns
+}
+```
+
+After every `@Call` invocation, `JrxHttpApi` calls `_syncState()`, which compares each `@State` field's current value against the snapshot captured before the call. Changed values are set on their `ReactiveVar`, which fires the WebSocket push.
+
+## Delta computation and WebSocket push
+
+The runtime does not send the entire component state on every update. It sends only the fields that changed:
+
+1. Before invoking a `@Call` method, `_captureStateSnapshot()` records the current value of every `@State` field.
+2. The `@Call` method runs.
+3. `_syncState()` walks every `@State` field again and calls `hasChanged()` for each:
+   - Simple types (`String`, `Number`, `Boolean`): compared with `Objects.equals`.
+   - POJOs: compared by a deep field-by-field hash (`getPojoHash`).
+   - `SmartList`/`SmartSet`/`SmartMap`: changes already fired structural delta events during the mutation; `hasChanged` returns `false` to avoid double-sending.
+4. For each changed field, the `ReactiveVar.set()` call notifies the WebSocket hub, which serializes the new value as a JSON delta and sends it to the browser.
+
+For `@Stateless` components the delta is computed differently: the full state is compared as `JsonNode` trees and a `batch` array of `{k, v}` pairs is returned along with a new signed state token.
+
+## Deep path updates
+
+A `@State` field can be a nested POJO. You can read and write nested fields naturally in Java, then call `updateState("fieldName")` to push the entire object:
+
+```java
+@State
+public StoreState store = new StoreState();
+
+public static class StoreState implements Serializable {
+    public Ui ui = new Ui();
+    public User user = new User();
+}
+
+public static class Ui implements Serializable {
+    public String theme  = "light";
+    public String lang   = "es";
+}
+
+@Call
+public void setBackendDark() {
+    store.ui.theme  = "dark";
+    store.ui.source = "backend:setDark";
+    updateState("store");  // explicit push for nested POJO mutations
+}
+```
+
+In the template you access nested paths with dot notation:
+
+```html
+<p>Theme: <b>{{store.ui.theme}}</b></p>
+<p>User: <b>{{store.user.name}}</b></p>
+```
+
+<Note>
+  `updateState("fieldName")` is only needed when you mutate fields **inside** a POJO or when you hold a reference to a plain (non-Smart) collection and replace it. For primitive `@State` fields and Smart collections, `_syncState()` detects changes automatically after every `@Call`.
+</Note>
+
+## Listening to changes in Java
+
+You can subscribe to `ReactiveVar` changes directly in Java — useful for derived state or cross-component coordination:
+
+```java
+@Bind public Type<String> greet = $("Hello");
+
+@Override
+public void onInit() {
+    // Unsubscribe handle returned; store it to call in onUnmount() if needed
+    greet.rx().onChange(newValue -> {
+        System.out.println("Greet changed to: " + newValue);
+    });
+}
+```
+
+All listeners registered on a `ReactiveVar` are cleared automatically when `onUnmount()` fires via `cleanupBindings()`.

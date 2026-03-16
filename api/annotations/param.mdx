@@ -1,0 +1,173 @@
+---
+title: "@Param and @UrlParam"
+description: "@Param injects a URL path segment from the @Route pattern into a field or method parameter. @UrlParam injects a query string parameter."
+---
+
+`@Param` and `@UrlParam` are field-level (and parameter-level, for `@Param`) annotations that inject values from the request URL into component fields. Both are available before `onInit()` is called.
+
+**Package:** `com.ciro.jreactive.router`
+
+**Target:** `FIELD`, `PARAMETER` (for `@Param`); `FIELD` only (for `@UrlParam`)
+
+**Retention:** `RUNTIME`
+
+---
+
+## `@Param`
+
+Injects a path segment extracted by the `@Route` pattern into a field or method parameter.
+
+### Annotation elements
+
+<ParamField body="value" type="String" required>
+  The name of the placeholder in the `@Route` pattern. For example, if the route is `@Route(path = "/users/{id}")`, use `@Param("id")` to inject the `id` segment.
+</ParamField>
+
+### Behavior
+
+1. The `RouteProvider.resolve()` call extracts named segments from the URL using `PathPattern.match()` and returns them in `Result.params()`.
+2. Before `onInit()` runs, the runtime writes the corresponding string value to the `@Param`-annotated field via `ComponentAccessor.write()`.
+3. In `@Call` method parameters, `@Param` is resolved from the stored route params map and injected at call time.
+
+### Type coercion
+
+Fields and parameters annotated with `@Param` receive the raw `String` value. For numeric types, declare the field as `String` and parse manually, or use Jackson deserialization via the method parameter path.
+
+### Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Param;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/users/{id}")
+@StatefulRam
+public class UserPage extends HtmlComponent {
+
+    @Param("id")
+    public String userId;
+
+    @State
+    public String userName = "";
+
+    @Override
+    public void onInit() {
+        // userId is already populated
+        userName = userService.findById(userId).getName();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <h1>User: {{userName}}</h1>
+            </div>
+            """;
+    }
+}
+```
+
+### Multiple path segments
+
+```java
+@Route(path = "/shop/{category}/{slug}")
+public class ProductPage extends HtmlComponent {
+
+    @Param("category")
+    public String category;
+
+    @Param("slug")
+    public String slug;
+
+    @Override
+    public void onInit() {
+        // Both fields are populated from the URL
+    }
+}
+```
+
+---
+
+## `@UrlParam`
+
+Injects a query string parameter (e.g., `?search=java`) into a field. Recommended to combine with `@State` or `@Bind` so the value participates in reactive diffing.
+
+### Annotation elements
+
+<ParamField body="value" type="String" default='""'>
+  The query string parameter name. When empty, the Java field name is used. For example, `@UrlParam("search")` on a field named `query` injects the value of `?search=...`.
+</ParamField>
+
+### Behavior
+
+1. The runtime extracts all query parameters from the incoming URL and stores them in the session.
+2. Before `onInit()` runs, each `@UrlParam`-annotated field is set to the corresponding query parameter string value.
+3. The set of `@UrlParam` bindings is also exposed to the browser as `window.__JRX_URL_PARAMS__` so the JS runtime can include them in requests.
+
+### Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.StatefulRam;
+import com.ciro.jreactive.router.Route;
+import com.ciro.jreactive.router.UrlParam;
+import java.util.List;
+
+@Route(path = "/search")
+@StatefulRam
+public class SearchPage extends HtmlComponent {
+
+    @UrlParam("q")
+    @State
+    public String query = "";
+
+    @State
+    public List<String> results = List.of();
+
+    @Override
+    public void onInit() {
+        // query is populated from ?q=...
+        if (query != null && !query.isBlank()) {
+            results = searchService.search(query);
+        }
+    }
+
+    @Call
+    public void search(String q) {
+        this.query = q;
+        this.results = searchService.search(q);
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div>
+                <input name="query" placeholder="Search...">
+                <button @click="search(query)">Go</button>
+                <ul>
+                    {{#each results as result}}
+                        <li>{{result}}</li>
+                    {{/each}}
+                </ul>
+            </div>
+            """;
+    }
+}
+```
+
+---
+
+## Availability
+
+Both `@Param` and `@UrlParam` values are injected **before `onInit()` is called**, so you can safely read them during initialization.
+
+## Related
+
+- [`@Route`](/api/annotations/route) — defines the path pattern with `{placeholder}` segments
+- [`@State`](/api/annotations/state) — combine with `@UrlParam` for reactive query parameters
+- [HtmlComponent](/api/html-component) — `onInit()` lifecycle hook where injected values are first available

@@ -1,0 +1,114 @@
+---
+title: "Link"
+description: "An SPA-aware anchor component that triggers client-side navigation via the data-router attribute."
+---
+
+`Link` renders an `<a>` element with the `data-router` attribute. This attribute signals the JReactive runtime to intercept the click and perform client-side (pushState) navigation instead of a full page reload, enabling SPA-style transitions between routes.
+
+## Properties
+
+<ParamField path="href" type="String" default="">
+  The target URL. Should be a route registered with `@Route` on a JReactive component. Example: `"/clients"`.
+</ParamField>
+
+<ParamField path="text" type="String" default="">
+  The visible link text rendered as the anchor content.
+</ParamField>
+
+<ParamField path="onClick" type="String" default="">
+  An optional `@Call` expression invoked before navigation occurs. Useful for tracking, state cleanup, or conditional logic.
+</ParamField>
+
+## How data-router works
+
+The rendered HTML for `Link` is:
+
+```html rendered
+<a data-router href="/clients">
+  Clients
+</a>
+```
+
+The JReactive browser runtime listens for clicks on elements with `data-router` and intercepts them. Instead of following the href normally, it:
+
+1. Calls the server `@Call` handler for the target route (if `onClick` is set).
+2. Updates the browser URL with `history.pushState`.
+3. Fetches and renders the new route component over WebSocket.
+
+Without `data-router`, clicking an `<a href="/clients">` causes a full page navigation and resets all WebSocket connections and component state.
+
+## Difference from a plain `<a>` tag
+
+| | `<Link>` component | Plain `<a href="...">` |
+|---|---|---|
+| Navigation mode | Client-side (SPA) | Full page reload |
+| WebSocket preserved | Yes | No — connection resets |
+| onClick `@Call` support | Yes | No |
+| `data-router` attribute | Added automatically | Must add manually |
+
+If you prefer a plain anchor with SPA navigation, add `data-router` manually:
+
+```html template
+<a data-router href="/settings">Settings</a>
+```
+
+## Usage example
+
+```html template
+<!-- Basic SPA navigation link -->
+<Link href="/clients" text="View clients" />
+
+<!-- Link with server-side onClick callback -->
+<Link href="/profile" text="My profile" onClick="trackNavigation()" />
+
+<!-- Dynamic href from state -->
+<Link :href="profileUrl" text="Open profile" />
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/home")
+public class HomePage extends AppPage {
+
+    @State public String profileUrl = "/profile";
+
+    @Call
+    public void trackNavigation() {
+        // Log or track the navigation event server-side
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <nav>
+                <Link href="/clients" text="Clients" />
+                <Link href="/settings" text="Settings" />
+                <Link :href="profileUrl" text="My profile" onClick="trackNavigation()" />
+            </nav>
+        """;
+    }
+}
+```
+
+## Navigation in a layout component
+
+`Link` is most useful inside layout or navigation components shared across pages:
+
+```html template
+<header class="main-nav">
+    <Link href="/" text="Home" />
+    <Link href="/clients" text="Clients" />
+    <Link href="/reports" text="Reports" />
+    <Link href="/settings" text="Settings" />
+</header>
+```
+
+<Note>
+  All `href` values should correspond to paths registered with `@Route` on a JReactive `AppPage` subclass. Linking to an unregistered path causes a 404 response from the server.
+</Note>

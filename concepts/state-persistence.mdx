@@ -1,0 +1,196 @@
+---
+title: "State persistence"
+description: "JReactive offers three state persistence strategies — @StatefulRam (Caffeine), @Stateful (Redis), and @Stateless (signed client token). Choose based on your memory, durability, and horizontal scaling requirements."
+---
+
+Every non-stateless JReactive component needs somewhere to live between HTTP requests. JReactive offers three strategies, selected by annotating the component class:
+
+| Annotation | Storage | Durability | Horizontal scaling | Memory cost |
+|---|---|---|---|---|
+| `@StatefulRam` | Caffeine (JVM heap) | None — lost on restart | No shared state across pods | Per component instance |
+| `@Stateful` | Redis (via Jedis) | Yes — survives restarts | Yes — any pod can serve | Low — state in Redis |
+| `@Stateless` | Client (signed token) | N/A — regenerated each call | Yes — no shared state needed | Zero |
+
+## `@StatefulRam` — in-memory with Caffeine
+
+Components annotated with `@StatefulRam` are stored exclusively in the JVM heap using a Caffeine cache. They are **never** serialized to Redis or any external store.
+
+```java
+@Route(path = "/signup")
+@StatefulRam
+@Client
+public class SignupPage extends AppPage {
+    @State PageState state = new PageState();
+    ...
+}
+```
+
+The `CaffeineStateStore` is configured with:
+
+- **30-minute TTL** (`expireAfterAccess(30, TimeUnit.MINUTES)`)
+- **10,000 maximum entries** (`maximumSize(10_000)`)
+- **Automatic unmount on eviction** — when Caffeine evicts an entry (expiry or capacity), it calls `_unmountRecursive()` on the component to clean up timers and listeners
+
+```java
+// CaffeineStateStore configuration (from source)
+this.cache = Caffeine.newBuilder()
+        .expireAfterAccess(30, TimeUnit.MINUTES)
+        .maximumSize(10_000)
+        .removalListener((String key, HtmlComponent val, RemovalCause cause) -> {
+            if (val != null) val._unmountRecursive();
+        })
+        .build();
+```
+
+The cache key is `sessionId + "::" + path`. Multiple components from the same session can coexist without collisions.
+
+**When to use:** Interactive, session-local components that do not need to survive server restarts. Best combined with `@Client` to minimise serialization overhead. The default choice for most UI components.
+
+## `@Stateful` — Redis-backed persistence
+
+Components annotated with `@Stateful` are serialized and stored in Redis. Any pod in a cluster can reconstruct the component state from Redis.
+
+```java
+@Route(path = "/dashboard")
+@Stateful
+public class DashboardPage extends AppPage {
+    @State public DashboardData data = new DashboardData();
+    ...
+}
+```
+
+The `RedisStateStore` stores each component as a Redis hash at the key `jrx:page:{sessionId}:{path}` with two fields:
+
+- `data` — serialized component bytes (Jackson JSON or FST binary)
+- `v` — optimistic locking version counter
+
+Concurrent writes use a Lua CAS script that atomically checks the current version before overwriting:
+
+```lua
+local currentVer = tonumber(redis.call('hget', key, 'v') or '0')
+if currentVer == expectedVer then
+    redis.call('hset', key, 'data', newData, 'v', currentVer + 1)
+    redis.call('expire', key, 1800)
+    return 1
+else
+    return 0
+end
+```
+
+Configuration:
+
+- **TTL**: 30 minutes (`1800` seconds)
+- **Key pattern**: `jrx:page:{sid}:{path}`
+- **Session index**: `jrx:idx:{sid}` — a Redis `SET` of all paths for a session, used for bulk cleanup
+- **Serialization**: Jackson (default) or FST binary (configurable via `RedisStoreConfig`)
+
+**When to use:** Components that must survive server restarts, or applications deployed across multiple pods without sticky sessions.
+
+<Warning>
+  Components marked `@Stateful` must implement `java.io.Serializable` (and so must all their `@State` field types). Jackson requires that POJO fields be public or have getters/setters. Transient fields (marked `transient`) are not persisted.
+</Warning>
+
+## `@Stateless` — signed client token
+
+Components annotated with `@Stateless` carry their state in a signed, LZ4-compressed token embedded in the page HTML. The server holds no memory for these components.
+
+```java
+@Route(path = "/server-owned")
+@DomMode(JrxDomMode.SERVER_OWNED)
+@Stateless
+public class ServerOwnedTestPage extends AppPage {
+    @State public int counter = 0;
+    @State public List<String> logs = new ArrayList<>();
+}
+```
+
+How it works (`JrxStateToken`):
+
+1. **Encode**: The binding map is serialized to JSON, compressed with LZ4 (`LZ4BlockOutputStream`), Base64url-encoded, and signed with HMAC-SHA256. A `_exp` timestamp (2 hours in the future) is included in the payload.
+2. **Token format**: `base64url(lz4(json)) + "." + base64url(hmac_sha256)`
+3. **On each `@Call`**: The browser sends the token as `stateToken` in the request body. `JrxHttpApi` verifies the signature, checks expiry, decompresses, and hydrates the component's `ReactiveVar` map.
+4. **Response**: A new token (with updated state) is returned as `newStateToken` alongside the state deltas or HTML fragment.
+
+```java
+// JrxStateToken internals
+public static String encode(Map<String, Object> state) throws Exception {
+    Map<String, Object> payload = new HashMap<>(state);
+    payload.put("_exp", System.currentTimeMillis() + 7200000); // 2 hours
+
+    String json = TOKEN_MAPPER.writeValueAsString(payload);
+
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    try (LZ4BlockOutputStream lz4Out = new LZ4BlockOutputStream(baos)) {
+        lz4Out.write(json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    String base64Zipped = Base64.getUrlEncoder().withoutPadding().encodeToString(baos.toByteArray());
+    String signature = sign(base64Zipped);   // HMAC-SHA256
+    return base64Zipped + "." + signature;
+}
+```
+
+The signing secret is read from `JRX_SECRET` environment variable. If the variable is absent, a random UUID is used and tokens are invalidated on restart.
+
+**When to use:** Public pages, landing pages, or forms where horizontal scaling matters and per-user server memory is unacceptable.
+
+## `HybridStateStore` — L1 Caffeine + L2 Redis
+
+When the `jreactive-store-redis` module is on the classpath and configured, JReactive automatically uses `HybridStateStore` as a two-level cache:
+
+```
+Read path:   L1 (Caffeine) → L2 (Redis) → null
+Write path:  L1 always; L2 only if component is NOT @StatefulRam
+```
+
+```java
+// HybridStateStore.get()
+public HtmlComponent get(String sid, String path) {
+    HtmlComponent comp = l1.get(sid, path);   // try Caffeine first
+    if (comp != null) return comp;
+
+    comp = l2.get(sid, path);                 // fallback to Redis
+    if (comp != null) {
+        l1.put(sid, path, comp);              // read-repair into L1
+    }
+    return comp;
+}
+
+// @StatefulRam components never reach Redis
+public void put(String sid, String path, HtmlComponent comp) {
+    l1.put(sid, path, comp);
+    if (comp.getClass().isAnnotationPresent(StatefulRam.class)) {
+        return;  // skip Redis
+    }
+    l2.put(sid, path, comp);
+}
+```
+
+Concurrent writes on `@Stateful` components use the Lua CAS script described above. Writes on `@StatefulRam` components use Caffeine's atomic `compute()`.
+
+`HybridStateStore` accepts a `strongConsistency` flag:
+- **`true`** (enterprise): Redis writes are synchronous; CAS conflicts invalidate the L1 entry.
+- **`false`** (speed): Redis writes are async via `CompletableFuture.runAsync()`; conflicts log a warning and invalidate L1.
+
+## Session cleanup
+
+`SessionCleanupConfig` registers a `HttpSessionListener` that evicts all JReactive components associated with a session when the HTTP session is destroyed (timeout or explicit invalidation):
+
+```java
+@Configuration
+public class SessionCleanupConfig {
+
+    @Bean
+    public ServletListenerRegistrationBean<HttpSessionListener> httpSessionListener(
+            PageResolver pageResolver) {
+        return new ServletListenerRegistrationBean<>(new HttpSessionListener() {
+            @Override
+            public void sessionDestroyed(HttpSessionEvent se) {
+                pageResolver.evictAll(se.getSession().getId());
+            }
+        });
+    }
+}
+```
+
+`pageResolver.evictAll(sessionId)` removes all entries from both Caffeine and Redis for that session ID, calling `_unmountRecursive()` on each evicted component so timers and listeners are cleaned up before the objects are garbage-collected.

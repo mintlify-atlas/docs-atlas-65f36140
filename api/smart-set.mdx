@@ -1,0 +1,191 @@
+---
+title: "SmartSet"
+description: "Reactive HashSet that fires ADD, REMOVE, and CLEAR delta events on mutation. Use it with @State Set<E> fields for efficient browser updates without full re-renders."
+---
+
+`SmartSet<E>` extends `HashSet<E>` and intercepts mutating methods to fire change events. The JReactive runtime subscribes to these events and sends a minimal JSON delta over the WebSocket.
+
+**Package:** `com.ciro.jreactive.smart`
+
+```java
+public class SmartSet<E> extends HashSet<E>
+```
+
+<Note>
+  You do not need to construct `SmartSet` manually. When the framework processes a `@State Set<E>` field, it wraps the raw `HashSet` in a `SmartSet` automatically. Declare your field as `Set<E>` and assign a plain `HashSet`.
+</Note>
+
+## Constructors
+
+```java
+public SmartSet()
+public SmartSet(Collection<? extends E> c)
+```
+
+Create an empty set or copy an existing collection into the smart set.
+
+## The `Change` record
+
+```java
+public record Change(String op, Object item) {}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `op` | `String` | Operation name: `"ADD"`, `"REMOVE"`, or `"CLEAR"`. |
+| `item` | `Object` | The element involved. `null` for `CLEAR`. |
+
+<Note>
+  Unlike `SmartList`, `SmartSet` does not carry an `index` in its `Change` record because sets are unordered.
+</Note>
+
+## Change event types
+
+| `op` | Trigger | Wire delta |
+|---|---|---|
+| `ADD` | `add(E)` | `{"op":"ADD","item":{...}}` |
+| `REMOVE` | `remove(Object)` | `{"op":"REMOVE","item":{...}}` |
+| `CLEAR` | `clear()` | `{"op":"CLEAR"}` |
+
+## Methods
+
+### `add(E e)`
+
+```java
+@Override
+public boolean add(E e)
+```
+
+Adds the element if it is not already present and fires an `ADD` event. If the element is already in the set, no event is fired.
+
+<ResponseField name="return value" type="boolean">
+  `true` if the element was added (was not already in the set).
+</ResponseField>
+
+---
+
+### `remove(Object o)`
+
+```java
+@Override
+public boolean remove(Object o)
+```
+
+Removes the element if present and fires a `REMOVE` event. If the element is not in the set, no event is fired.
+
+<ResponseField name="return value" type="boolean">
+  `true` if the element was found and removed.
+</ResponseField>
+
+---
+
+### `clear()`
+
+```java
+@Override
+public void clear()
+```
+
+Clears all elements (if non-empty) and fires a single `CLEAR` event. The browser removes all rendered set items.
+
+---
+
+### `update(E element)`
+
+```java
+public void update(E element)
+```
+
+Forces a re-render delta for an element that is already in the set. If the element exists, fires a `REMOVE` event followed by an `ADD` event for the same item. Use this when you have mutated the internal state of an element object (by reference) and need the browser to reflect the new value.
+
+<ParamField query="element" type="E" required>
+  The element whose rendered representation should be refreshed. The element must already be in the set; if it is not, no events are fired.
+</ParamField>
+
+---
+
+### `subscribe(Consumer<Change> listener)`
+
+```java
+public void subscribe(Consumer<Change> listener)
+```
+
+Registers a listener for change events.
+
+<ParamField query="listener" type="Consumer<Change>" required>
+  Callback that receives a `Change` record describing the mutation.
+</ParamField>
+
+---
+
+### `unsubscribe(Consumer<Change> listener)`
+
+```java
+public void unsubscribe(Consumer<Change> listener)
+```
+
+Removes a previously registered listener.
+
+## Wire delta format
+
+```json
+// ADD
+{ "op": "ADD", "item": "backend" }
+
+// REMOVE
+{ "op": "REMOVE", "item": "frontend" }
+
+// CLEAR
+{ "op": "CLEAR" }
+```
+
+## Example
+
+```java
+@Route(path = "/tags")
+@Client
+@StatefulRam
+public class TagManager extends HtmlComponent {
+
+    // Declare as Set<String> — framework upgrades to SmartSet automatically
+    @State
+    public Set<String> selectedTags = new HashSet<>();
+
+    @Call
+    public void toggleTag(String tag) {
+        if (selectedTags.contains(tag)) {
+            // Fires REMOVE delta
+            selectedTags.remove(tag);
+        } else {
+            // Fires ADD delta
+            selectedTags.add(tag);
+        }
+    }
+
+    @Call
+    public void clearTags() {
+        // Fires CLEAR delta
+        selectedTags.clear();
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div class="tag-manager">
+                <h3>Selected tags ({{selectedTags.size}})</h3>
+                <ul>
+                    {{#each selectedTags as tag}}
+                        <li>
+                            {{tag}}
+                            <button @click="toggleTag(tag)">Remove</button>
+                        </li>
+                    {{/each}}
+                </ul>
+                <button @click="toggleTag('java')">Toggle java</button>
+                <button @click="toggleTag('reactive')">Toggle reactive</button>
+                <button @click="clearTags()">Clear all</button>
+            </div>
+            """;
+    }
+}
+```

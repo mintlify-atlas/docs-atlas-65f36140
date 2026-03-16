@@ -1,0 +1,116 @@
+---
+title: "@Client"
+description: "Activates Client-Side Rendering (CSR) mode. The APT processor generates a pre-compiled JS template at compile time, and the browser renders it locally."
+---
+
+`@Client` switches a component to Client-Side Rendering mode. Instead of sending a fully rendered HTML fragment from the server, JReactive emits a lightweight shell element. The browser's JS runtime picks up that shell, locates the pre-compiled JS template generated at compile time, and renders the component locally.
+
+**Package:** `com.ciro.jreactive.annotations`
+
+**Target:** `TYPE`
+
+**Retention:** `RUNTIME`
+
+## Behavior
+
+### Compile time
+
+The `jreactive-apt` annotation processor detects `@Client` on a component and generates a JS template registered under `window.JRX_RENDERERS['pkg_ClassName']`. The key is the fully-qualified class name with dots and `$` replaced by `_`.
+
+For example, `com.example.CounterLeaf` becomes `window.JRX_RENDERERS['com_example_CounterLeaf']`.
+
+The generated renderer exposes:
+
+```js
+window.JRX_RENDERERS['pkg_ClassName'] = {
+    getTemplate() { return '<div>...</div>'; },  // pre-compiled HTML template
+    bindings: ['count', 'label']                  // list of reactive bindings
+};
+```
+
+### Runtime
+
+When the server renders a `@Client` component, it emits a shell element instead of the full HTML:
+
+```html
+<div data-jrx-client="com_example_CounterLeaf" data-jrx-id="CounterLeaf-0"></div>
+```
+
+The JS runtime detects `data-jrx-client`, looks up `window.JRX_RENDERERS['com_example_CounterLeaf']`, and renders the template into the shell element. State updates (delta batches) are applied locally by the JS runtime without a server round-trip.
+
+### State management
+
+`@Client` is orthogonal to state persistence. Combine it with a state storage annotation:
+
+| Combination | Behavior |
+|---|---|
+| `@Client` + `@StatefulRam` | Most common. State lives in Caffeine; JS renders locally. |
+| `@Client` + `@Stateful` | State persists in Redis; JS renders locally. |
+| `@Client` alone | Defaults to `@StatefulRam` behavior. |
+
+<Note>
+  `@Client` does **not** affect how `@Call` methods work. Server-side `@Call` execution, rate limiting, and validation all function identically regardless of rendering mode.
+</Note>
+
+## When to use `@Client`
+
+- Components with heavy local interactivity (text editors, drag-and-drop, animations).
+- Leaf components that are rendered many times on a page and where server-side rendering would be expensive.
+- When you need the client to apply state updates immediately, before the WebSocket round-trip completes.
+
+<Tip>
+  `@Client` is ideal for reusable leaf components (`CounterLeaf`, `ClockLeaf`, form widgets) that embed directly inside server-rendered page components.
+</Tip>
+
+## Example
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.State;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.Client;
+import com.ciro.jreactive.annotations.StatefulRam;
+
+@Client
+@StatefulRam
+public class CounterLeaf extends HtmlComponent {
+
+    @State
+    public int count = 0;
+
+    @Call
+    public void increment() {
+        count++;
+    }
+
+    @Call
+    public void reset() {
+        count = 0;
+    }
+
+    @Override
+    protected String template() {
+        return """
+            <div style="border: 2px dashed #666; padding: 10px;">
+                <p>Count: <strong>{{count}}</strong></p>
+                <button @click="increment()">+1</button>
+                <button @click="reset()">Reset</button>
+            </div>
+            """;
+    }
+}
+```
+
+The APT processor generates a JS file that registers `window.JRX_RENDERERS['com_example_CounterLeaf']`. At runtime, the server emits:
+
+```html
+<div data-jrx-client="com_example_CounterLeaf" data-jrx-id="CounterLeaf-0"></div>
+```
+
+The JS runtime renders the template into this shell and wires up the reactive bindings.
+
+## Related
+
+- [`@StatefulRam`](/api/annotations/statefulram) — the typical state store pairing for `@Client` components
+- [`@DomMode`](/api/annotations/dommode) — `CLIENT_MANAGED` (default) vs `SERVER_OWNED` DOM ownership
+- [`ComponentAccessor`](/api/component-accessor) — the generated accessor class used by both CSR and SSR runtimes

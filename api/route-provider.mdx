@@ -1,0 +1,174 @@
+---
+title: "RouteProvider"
+description: "Interface that maps a URL path to an HtmlComponent instance and its extracted path parameters. Implement this interface to customize route resolution."
+---
+
+`RouteProvider` is the routing abstraction in JReactive. Given a URL path string, it returns a fresh component instance and a map of path parameters extracted from the URL pattern. The framework calls `RouteProvider.resolve()` on every incoming page request.
+
+**Package:** `com.ciro.jreactive.router`
+
+## Interface definition
+
+```java
+public interface RouteProvider {
+    Result resolve(String path);
+
+    record Result(HtmlComponent component, Map<String, String> params) {}
+}
+```
+
+## Methods
+
+<ResponseField name="resolve" type="RouteProvider.Result">
+  Resolves a URL path to a component instance and its path parameters.
+
+  | Parameter | Type | Description |
+  |---|---|---|
+  | `path` | `String` | The URL path to resolve, e.g., `"/users/42"` |
+
+  Returns a `Result` record containing:
+  - `component` — a fresh `HtmlComponent` instance for the matched route.
+  - `params` — a `Map<String, String>` of named path parameters extracted from the URL. Empty map if the route has no placeholders.
+
+  Throw a `RuntimeException` (or return the root `/` component as a fallback) when no route matches.
+</ResponseField>
+
+## `RouteProvider.Result`
+
+```java
+record Result(HtmlComponent component, Map<String, String> params) {}
+```
+
+<ResponseField name="component" type="HtmlComponent">
+  The component instance to serve for the matched route. The runtime stores this instance in `StateStore` for the session and calls `onInit()` on first access.
+</ResponseField>
+
+<ResponseField name="params" type="Map&lt;String, String&gt;">
+  Path parameters extracted from the URL. For a route pattern `/users/{id}` and path `/users/42`, this map contains `{"id": "42"}`. Empty map when the route has no placeholders.
+</ResponseField>
+
+## Built-in implementations
+
+### `RouteRegistry` (Spring Boot)
+
+**Module:** `jreactive-starter-spring`  
+**Package:** `com.ciro.jreactive.router`
+
+Scans the classpath for `@Route`-annotated classes at startup using Spring's `ClassPathScanningCandidateComponentProvider`. Creates component instances via `AutowireCapableBeanFactory.createBean()` so Spring injects `@Autowired` dependencies.
+
+- Requires at least one `@Route(path = "/")` root component.
+- Automatically registered as a Spring `@Component`.
+- Falls back to the root `/` route when no other route matches.
+
+```java
+// Spring Boot: RouteRegistry is auto-configured
+// Just annotate your component:
+@Route(path = "/users/{id}")
+public class UserPage extends HtmlComponent { ... }
+```
+
+### `SimpleRouteRegistry` (standalone)
+
+**Module:** `jreactive-standalone`  
+**Package:** `com.ciro.jreactive.standalone`
+
+A manual registry for use without Spring. Routes are added programmatically via `add(path, factory)`.
+
+```java
+SimpleRouteRegistry registry = new SimpleRouteRegistry();
+registry.add("/",             HomePage::new);
+registry.add("/about",        AboutPage::new);
+registry.add("/users/{id}",   UserPage::new);
+registry.add("/shop/{cat}/{slug}", ProductPage::new);
+```
+
+Throws `RuntimeException` when no route matches (no fallback to root).
+
+## Implementing a custom `RouteProvider`
+
+You can implement `RouteProvider` to add middleware logic, multi-tenant routing, or dynamic route registration:
+
+```java
+import com.ciro.jreactive.HtmlComponent;
+import com.ciro.jreactive.router.RouteProvider;
+import java.util.Map;
+
+public class TenantRouteProvider implements RouteProvider {
+
+    private final RouteProvider delegate;
+    private final TenantResolver tenantResolver;
+
+    public TenantRouteProvider(RouteProvider delegate, TenantResolver tenantResolver) {
+        this.delegate = delegate;
+        this.tenantResolver = tenantResolver;
+    }
+
+    @Override
+    public Result resolve(String path) {
+        // Delegate to the underlying registry
+        Result result = delegate.resolve(path);
+
+        // Inject tenant context into the component before onInit()
+        if (result.component() instanceof TenantAware ta) {
+            ta.setTenant(tenantResolver.currentTenant());
+        }
+
+        return result;
+    }
+}
+```
+
+### Registering with Spring Boot
+
+Declare a `@Primary` bean to replace the auto-configured `RouteRegistry`:
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
+
+@Configuration
+public class JrxConfig {
+
+    @Bean
+    @Primary
+    public RouteProvider routeProvider(RouteRegistry registry,
+                                       TenantResolver tenantResolver) {
+        return new TenantRouteProvider(registry, tenantResolver);
+    }
+}
+```
+
+### Registering standalone
+
+Pass the custom provider to the JReactive server builder:
+
+```java
+SimpleRouteRegistry registry = new SimpleRouteRegistry();
+registry.add("/", HomePage::new);
+
+RouteProvider provider = new TenantRouteProvider(registry, tenantResolver);
+
+// Pass provider to the standalone server configuration
+JrxServer server = JrxServer.builder()
+    .routeProvider(provider)
+    .build();
+```
+
+## Path pattern syntax
+
+Both built-in implementations use `PathPattern.compile()` for matching:
+
+| Pattern | Example path | Extracted params |
+|---|---|---|
+| `/about` | `/about` | `{}` |
+| `/users/{id}` | `/users/42` | `{"id": "42"}` |
+| `/shop/{cat}/{slug}` | `/shop/books/clean-code` | `{"cat": "books", "slug": "clean-code"}` |
+
+Placeholder names must match the `@Param` annotation values used in the component.
+
+## Related
+
+- [`@Route`](/api/annotations/route) — the annotation that registers a component in `RouteRegistry`
+- [`@Param`](/api/annotations/param) — injects extracted path parameters into component fields
+- [`ComponentFactory`](/api/component-factory) — used by `RouteProvider` to create component instances

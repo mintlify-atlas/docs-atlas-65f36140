@@ -1,0 +1,94 @@
+---
+title: "Introduction"
+description: "Build fully interactive SPAs entirely in Java — no JavaScript required."
+---
+
+JReactive is a **server-driven reactive UI framework** for Java 21. It lets you build fully interactive single-page applications (SPAs) entirely in Java — state management, event handling, and template rendering all run on the JVM, while the browser receives real-time DOM updates over WebSocket.
+
+Think of it as the Java equivalent of Phoenix LiveView or Blazor Server: your application logic never leaves the server, yet users get a fluid, reactive experience.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first JReactive component in under five minutes.
+  </Card>
+  <Card title="How it works" icon="gear" href="/how-it-works">
+    Understand the server-driven rendering model and WebSocket protocol.
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/components">
+    Deep-dive into components, reactive state, templates, and routing.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/html-component">
+    Full reference for every class, annotation, and interface.
+  </Card>
+</CardGroup>
+
+## Why JReactive?
+
+Modern web applications demand interactivity, but building them typically means maintaining two separate codebases — a Java back end and a JavaScript front end — with all the complexity that entails.
+
+JReactive collapses that boundary. Your entire application lives in Java:
+
+- **No context switching** between Java and JavaScript.
+- **No REST API to design** for your own front end.
+- **No state synchronization bugs** between client and server.
+- **Full access to the JVM ecosystem** — Spring beans, Jakarta validation, Caffeine, Redis — directly from your UI code.
+
+## How it works at a glance
+
+<Steps>
+  <Step title="Define a component">
+    Extend `HtmlComponent`, write a `template()` method returning HTML with `{{variable}}` bindings, and annotate fields with `@State` and methods with `@Call`.
+  </Step>
+  <Step title="Register a route">
+    Annotate your component with `@Route(path = "/my-page")`. Spring Boot auto-configuration discovers it automatically.
+  </Step>
+  <Step title="State changes propagate automatically">
+    When an `@Call` method mutates a `@State` field or a `ReactiveVar`, JReactive computes the minimal diff and pushes it over WebSocket. The browser applies the update using Idiomorph DOM morphing — no full page reload.
+  </Step>
+</Steps>
+
+## Key features
+
+<AccordionGroup>
+  <Accordion title="Server-driven rendering with WebSocket deltas">
+    State lives on the server in a Caffeine or Redis store. Every mutation triggers a diff computation and sends only changed binding values to the browser. Smart collections (`SmartList`, `SmartSet`, `SmartMap`) send structural deltas — not full snapshots — for efficient list updates.
+  </Accordion>
+  <Accordion title="AOT annotation processing">
+    The `jreactive-apt` annotation processor runs at `mvn compile`. It validates your templates against your Java fields at compile time, generates zero-reflection accessor classes, and pre-compiles client-side JS templates. Runtime overhead is minimal.
+  </Accordion>
+  <Accordion title="Multiple rendering modes">
+    Choose the rendering strategy that fits your use case: SSR with WebSocket hydration (default), CSR shells with pre-compiled JS templates (`@Client`), server-owned HTML-on-the-wire (`@DomMode(SERVER_OWNED)`), or stateless signed-token mode (`@Stateless`) for zero server memory.
+  </Accordion>
+  <Accordion title="Spring Boot integration">
+    Add the `jreactive-starter-spring` dependency and JReactive auto-configures itself. Route components are full Spring beans — use `@Autowired` to inject repositories, services, or any other Spring-managed dependency.
+  </Accordion>
+  <Accordion title="Standalone mode (no Spring required)">
+    Use `jreactive-standalone` for an Undertow-based server without any Spring dependency. Suitable for microservices and embedded deployments.
+  </Accordion>
+  <Accordion title="Built-in UI component library">
+    `jreactive-ui` ships with ready-to-use components: `JButton`, `JInput`, `JSelect`, `JCheckBox`, `JForm`, `JTable`, `JCard`, `JModal`, and `Link`. All support reactive property bindings.
+  </Accordion>
+</AccordionGroup>
+
+## Module overview
+
+JReactive is a multi-module Maven project. You only need the modules relevant to your setup:
+
+| Module | Artifact | Purpose |
+|---|---|---|
+| `jreactive-core` | `com.ciro:jreactive-core` | Core annotations, interfaces, template engine |
+| `jreactive-apt` | `com.ciro:jreactive-apt` | AOT annotation processor (compile-time only) |
+| `jreactive-runtime-jvm` | `com.ciro:jreactive-runtime-jvm` | JVM runtime: WebSocket, HTTP API, page resolver |
+| `jreactive-runtime-js` | `com.ciro:jreactive-runtime-js` | Browser-side JS runtime (static resources) |
+| `jreactive-starter-spring` | `com.ciro:jreactive-starter-spring` | Spring Boot auto-configuration |
+| `jreactive-ui` | `com.ciro:jreactive-ui` | Built-in UI component library |
+| `jreactive-store-redis` | `com.ciro:jreactive-store-redis` | Redis-backed state store |
+| `jreactive-standalone` | `com.ciro:jreactive-standalone` | Undertow standalone server |
+
+## Project status
+
+JReactive is currently at version `0.0.1-SNAPSHOT`. The API is under active development. Expect breaking changes until a stable release is tagged.
+
+<Note>
+  All artifacts are deployed via [JitPack](https://jitpack.io). See the [Quickstart](/quickstart) for repository and dependency configuration.
+</Note>

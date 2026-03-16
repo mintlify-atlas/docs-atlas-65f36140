@@ -1,0 +1,203 @@
+---
+title: "Forms and validation"
+description: "Use Jakarta Bean Validation with @Call methods to validate form submissions and display per-field errors without writing JavaScript."
+---
+
+JReactive integrates Jakarta Bean Validation (formerly JSR-380) directly into the `@Call` dispatch pipeline. When you annotate a method parameter with `@Valid`, JReactive validates the object before your method body runs. If validation fails, the server returns a structured error response and the JS runtime renders per-field error messages automatically.
+
+## How validation works
+
+The `CallGuard` bean intercepts every `@Call` invocation. When it sees a parameter annotated with `@Valid`, it runs the Jakarta `Validator` against the bound object. If any constraint violations are found:
+
+1. The method body is **never entered**.
+2. `CallGuard` returns a JSON response with `"code": "VALIDATION"` and a map of field paths to error messages.
+3. The JS runtime reads this map and renders each error message next to the matching input using `data-error-for` attributes.
+
+```json
+{
+  "ok": false,
+  "code": "VALIDATION",
+  "errors": {
+    "form.name":     "El nombre es obligatorio",
+    "form.email":    "El correo no tiene un formato válido",
+    "form.password": "La contraseña debe tener al menos 8 caracteres"
+  }
+}
+```
+
+## Defining a validated form DTO
+
+Create a static inner class (or a standalone class) that implements `Serializable` and annotate its fields with Bean Validation constraints. The `SignupPage` from the demo project is a complete example:
+
+```java
+@Route(path = "/signup")
+@StatefulRam
+@Client
+public class SignupPage extends AppPage {
+
+    public static class SignupForm implements Serializable {
+
+        @NotBlank(message = "El nombre es obligatorio")
+        public String name;
+
+        @NotBlank(message = "El correo es obligatorio")
+        @Email(message = "El correo no tiene un formato válido")
+        public String email;
+
+        @NotBlank(message = "La contraseña es obligatoria")
+        @Size(min = 8, message = "La contraseña debe tener al menos 8 caracteres")
+        public String password;
+    }
+
+    public static class PageState implements Serializable {
+        public String lastMessage;
+    }
+
+    @State PageState state = new PageState();
+
+    @Call
+    public void register(@Valid SignupForm form) {
+        // Only reached if all constraints pass
+        state.lastMessage = "Usuario " + form.name + " registrado correctamente";
+        updateState("state");
+    }
+
+    @Call
+    public void validar(@Valid SignupForm form) {
+        // Validate on every keystroke — method body is empty because
+        // CallGuard returns errors before entering here
+    }
+}
+```
+
+## Binding form fields in the template
+
+Use `name="object.field"` on input elements to bind them to the nested path on the form DTO. The JS runtime collects all inputs matching the argument name before sending the `@Call` request:
+
+```html
+<section>
+  <h1>Registro con Bean Validation</h1>
+
+  <div>
+    <label>Nombre:
+      <input type="text"
+             @input="validar(form)"
+             name="form.name">
+    </label>
+  </div>
+
+  <div>
+    <label>Correo:
+      <input type="email"
+             @input="validar(form)"
+             name="form.email">
+    </label>
+  </div>
+
+  <div>
+    <label>Contraseña:
+      <input type="password"
+             @input="validar(form)"
+             name="form.password">
+    </label>
+  </div>
+
+  <button type="button" @click="register(form)">
+    Registrarme
+  </button>
+
+  <p data-if="state.lastMessage">
+    {{state.lastMessage}}
+  </p>
+</section>
+```
+
+### Nested object binding
+
+The `form.field` naming convention works for arbitrarily nested objects. The JS runtime splits the `name` attribute on `.` and builds the request JSON accordingly:
+
+| Input `name` | JSON path sent | DTO field |
+|---|---|---|
+| `form.name` | `{ "form": { "name": "..." } }` | `SignupForm.name` |
+| `form.email` | `{ "form": { "email": "..." } }` | `SignupForm.email` |
+| `order.address.city` | `{ "order": { "address": { "city": "..." } } }` | `Order.address.city` |
+
+## Per-field error display
+
+After a validation failure response, the JS runtime looks for elements with a `data-error-for` attribute matching the error key and injects the error message as text content. You can add these placeholder elements anywhere in your template:
+
+```html
+<input type="text" name="form.name" @input="validar(form)">
+<span data-error-for="form.name" style="color: red;"></span>
+```
+
+When the `form.name` constraint fails, the span is populated with the constraint message. When validation passes, the span is cleared.
+
+## Using the `JForm` component
+
+The `jreactive-ui` library ships a `JForm` component that wraps a `<form>` element with optional title and layout props. Pass the submit handler via `onSubmit`:
+
+```html
+<JForm title="Nuevo Cliente" onSubmit="save(form)">
+    <JInput label="Nombre Completo" :field="form.name" required="true" />
+    <JInput label="Correo" type="email" :field="form.email" required="true" />
+</JForm>
+```
+
+`JForm` renders a `<form class="jrx-form">` with a `<button type="submit">` when `onSubmit` is set:
+
+```java
+public class JForm extends HtmlComponent {
+
+    @Bind public Type<String> title = $("");
+    @Bind public Type<String> layout = $("vertical");
+    @Bind public String onSubmit = "";
+
+    @Override
+    protected String template() {
+        return """
+            <form class="jrx-form" @submit="{{onSubmit}}" novalidate>
+              {{#if title}}
+                <h2 class="jrx-form-title">{{title}}</h2>
+              {{/if}}
+              <div class="jrx-form-body layout-{{layout}}">
+                 <slot />
+              </div>
+              {{#if onSubmit}}
+                <button type="submit">Enviar</button>
+              {{/if}}
+            </form>
+        """;
+    }
+}
+```
+
+## Real-time validation on input
+
+Call a `@Valid`-annotated method on `@input` events to provide instant feedback as the user types. Because the method body is empty, the only effect is the validation error response:
+
+```java
+@Call
+public void validar(@Valid SignupForm form) {
+    // Body intentionally empty — CallGuard handles the error response
+}
+```
+
+This pattern keeps server logic clean: validation is declarative on the DTO, and the method body only runs when all constraints pass.
+
+## Supported constraints
+
+Any constraint from `jakarta.validation.constraints` works. Common ones used in JReactive applications:
+
+| Constraint | Description |
+|---|---|
+| `@NotBlank` | String must not be null, empty, or whitespace |
+| `@NotNull` | Value must not be null |
+| `@Email` | String must be a valid email address format |
+| `@Size(min, max)` | String or collection length within bounds |
+| `@Min` / `@Max` | Numeric value within bounds |
+| `@Pattern(regexp)` | String matches the given regular expression |
+
+<Tip>
+You can define your own constraint annotations by implementing `ConstraintValidator<A, T>`. JReactive's `CallGuard` uses the standard Jakarta `Validator` API, so custom constraints work without any framework-specific configuration.
+</Tip>

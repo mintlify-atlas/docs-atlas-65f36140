@@ -1,0 +1,111 @@
+---
+title: "JCard"
+description: "A styled card container with title, subtitle, variant, and named body and footer slots."
+---
+
+`JCard` renders a `<div class="jrx-card jrx-card-{variant}">` container. It has an optional header section with title and subtitle, a default `<slot />` for body content, and a named `<slot name="footer" />` for footer content such as action buttons.
+
+## Properties
+
+<ParamField path="title" type="String" default="">
+  The card heading text rendered in `<h2 class="jrx-card-title">`. When empty, the entire header section is omitted.
+</ParamField>
+
+<ParamField path="subtitle" type="String" default="">
+  Secondary text rendered below the title in a `<p class="jrx-card-subtitle">`. Shown only when `title` is also set.
+</ParamField>
+
+<ParamField path="variant" type="String" default="flat">
+  Applied as `jrx-card-{variant}` CSS class on the root element. Built-in option is `flat`. Define additional variant styles in your CSS.
+</ParamField>
+
+<ParamField path="hoverable" type="boolean" default="false">
+  When `true`, adds hover styling to signal the card is interactive. The exact hover effect is controlled by your CSS.
+</ParamField>
+
+## Slots
+
+`JCard` exposes two slots:
+
+| Slot | Location | Description |
+|---|---|---|
+| Default (`<slot />`) | `jrx-card-body` | Main body content. Place any HTML or child components here. |
+| `footer` (`<slot name="footer" />`) | `jrx-card-footer` | Footer content. Typically action buttons, rendered right-aligned. |
+
+## Usage example
+
+```html template
+<!-- Basic card with body content -->
+<JCard title="Account summary" subtitle="Your current plan">
+    <p>You are on the <strong>Pro</strong> plan.</p>
+    <p>Next billing date: 2026-04-01</p>
+</JCard>
+
+<!-- Card with footer slot -->
+<JCard title="Confirm deletion" variant="flat">
+    <p>This action cannot be undone.</p>
+
+    <template slot="footer">
+        <button @click="cancel()">Cancel</button>
+        <button @click="confirmDelete()" style="background: red; color: white;">Delete</button>
+    </template>
+</JCard>
+
+<!-- Hoverable card -->
+<JCard title="Open report" hoverable="true">
+    <p>Monthly revenue report for March 2026.</p>
+</JCard>
+```
+
+## Java setup
+
+```java
+import com.ciro.jreactive.AppPage;
+import com.ciro.jreactive.annotations.Call;
+import com.ciro.jreactive.annotations.State;
+import com.ciro.jreactive.router.Route;
+
+@Route(path = "/dashboard")
+public class DashboardPage extends AppPage {
+
+    @State public String planName = "Pro";
+    @State public String nextBillingDate = "2026-04-01";
+
+    @Override
+    protected String template() {
+        return """
+            <JCard title="Account summary" :subtitle="planName">
+                <p>Next billing date: {{nextBillingDate}}</p>
+
+                <template slot="footer">
+                    <button @click="managePlan()">Manage plan</button>
+                </template>
+            </JCard>
+        """;
+    }
+}
+```
+
+## Variant options
+
+The variant is applied as a compound CSS class on the card root:
+
+| Variant value | CSS class | Typical use |
+|---|---|---|
+| `flat` | `jrx-card-flat` | Default. White background, subtle border. |
+
+Add custom variants by defining `.jrx-card-{variant}` rules in your application stylesheet:
+
+```css
+.jrx-card-elevated {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.jrx-card-outlined {
+    border: 2px solid #4F46E5;
+}
+```
+
+<Note>
+  The footer slot is always rendered in the DOM (inside `.jrx-card-footer`). If you provide no footer content the container is visible but empty. Add `{{#if showFooter}}` guards if you want to suppress the footer entirely.
+</Note>

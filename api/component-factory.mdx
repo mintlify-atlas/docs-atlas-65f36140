@@ -1,0 +1,143 @@
+---
+title: "ComponentFactory"
+description: "Interface for component instantiation. Replace the default no-arg constructor factory with a Spring bean factory or any custom provider."
+---
+
+`ComponentFactory` is the instantiation abstraction for JReactive components. The runtime calls `factory.create(SomeComponent.class)` whenever it needs a fresh component instance — for example, when a new user session navigates to a route. Replacing the factory lets you inject dependencies, apply interceptors, or use a DI container.
+
+**Package:** `com.ciro.jreactive.factory`
+
+## Interface definition
+
+```java
+public interface ComponentFactory {
+    <T> T create(Class<T> type);
+
+    default Object create(String id) {
+        throw new UnsupportedOperationException("String id factory not implemented");
+    }
+}
+```
+
+## Methods
+
+<ResponseField name="create(Class&lt;T&gt; type)" type="T">
+  Creates and returns a new instance of `type`. Must not return `null`. Throw a descriptive `IllegalStateException` if instantiation fails.
+
+  | Parameter | Type | Description |
+  |---|---|---|
+  | `type` | `Class<T>` | The component class to instantiate |
+</ResponseField>
+
+<ResponseField name="create(String id)" type="Object">
+  Optional overload for string-keyed component lookup. The default implementation throws `UnsupportedOperationException`. Override when you need to resolve components by logical name rather than class.
+</ResponseField>
+
+## `DefaultComponentFactory`
+
+`DefaultComponentFactory` uses the no-arg constructor via reflection:
+
+```java
+public class DefaultComponentFactory implements ComponentFactory {
+
+    @Override
+    public <T> T create(Class<T> type) {
+        if (type == null) throw new IllegalArgumentException("type cannot be null");
+        try {
+            Constructor<T> ctor = type.getDeclaredConstructor();
+            if (!ctor.canAccess(null)) ctor.setAccessible(true);
+            return ctor.newInstance();
+        } catch (NoSuchMethodException e) {
+            throw new IllegalStateException(
+                "No-arg constructor not found for: " + type.getName(), e);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                "Failed to instantiate: " + type.getName(), e);
+        }
+    }
+}
+```
+
+<Note>
+  Every component class must have a no-arg constructor accessible to `DefaultComponentFactory`. If you add a parameterized constructor, also declare an explicit public no-arg constructor.
+</Note>
+
+## Spring factory integration
+
+When using `jreactive-starter-spring`, `RouteRegistry` does not use `DefaultComponentFactory` directly. Instead, it uses `AutowireCapableBeanFactory.createBean()` as the supplier for each route:
+
+```java
+Supplier<HtmlComponent> sup = () -> beanFactory.createBean(compClass);
+```
+
+This means:
+
+- Route components are created as prototype-scoped Spring beans.
+- `@Autowired` field injection works even on classes that are not declared as `@Component`.
+- Spring proxies (AOP, `@Transactional`) are applied automatically.
+
+## Providing a custom factory
+
+You can supply a custom `ComponentFactory` for non-Spring setups, unit tests, or specialized initialization:
+
+```java
+public class GuiceComponentFactory implements ComponentFactory {
+
+    private final Injector injector;
+
+    public GuiceComponentFactory(Injector injector) {
+        this.injector = injector;
+    }
+
+    @Override
+    public <T> T create(Class<T> type) {
+        return injector.getInstance(type);
+    }
+}
+```
+
+### Registering with `SimpleRouteRegistry` (standalone)
+
+```java
+GuiceComponentFactory factory = new GuiceComponentFactory(injector);
+SimpleRouteRegistry registry = new SimpleRouteRegistry();
+
+// Register routes using the factory
+registry.add("/",          () -> factory.create(HomePage.class));
+registry.add("/users/{id}", () -> factory.create(UserPage.class));
+```
+
+### Registering with Spring Boot
+
+Declare a `@Bean` of type `ComponentFactory`. JReactive's auto-configuration uses `@ConditionalOnMissingBean`:
+
+```java
+@Configuration
+public class JrxConfig {
+
+    @Bean
+    public ComponentFactory componentFactory(ApplicationContext ctx) {
+        AutowireCapableBeanFactory beanFactory = ctx.getAutowireCapableBeanFactory();
+        return new ComponentFactory() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> T create(Class<T> type) {
+                return (T) beanFactory.createBean(type);
+            }
+        };
+    }
+}
+```
+
+## When to provide a custom factory
+
+- **Dependency injection without Spring** — Use Guice, Dagger, or Micronaut to inject services into components.
+- **Post-construction hooks** — Apply auditing, tracing, or initialization logic after every component is created.
+- **Testing** — Inject mocked services into components under test without needing a full Spring context.
+- **Multi-tenant routing** — Select a different concrete class based on tenant configuration before returning the instance.
+
+## Related
+
+- [`RouteProvider`](/api/route-provider) — uses `ComponentFactory` (via suppliers) to create instances during route resolution
+- [`ComponentAccessor`](/api/component-accessor) — used to interact with the component after it is created
+- [HtmlComponent](/api/html-component) — requires a no-arg constructor when using `DefaultComponentFactory`
